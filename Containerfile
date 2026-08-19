@@ -8,13 +8,16 @@ COPY 30-custom-bootc-composefs-build.conf /usr/lib/dracut/dracut.conf.d/30-custo
 RUN dnf install -y --setopt=install_weak_deps=false \
     bootc \
     bootupd \
+    btrfs-progs \
     container-selinux \
     coreutils \
+    cryptsetup \
     dnf \
     dosfstools \
     e2fsprogs \
     efibootmgr \
     fedora-repos-archive \
+    gdisk \
     grub2-efi \
     kernel \
     nss-altfiles \
