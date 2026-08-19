@@ -1,10 +1,18 @@
-FROM quay.io/fedora/fedora:44
+ARG RELEASE=44
+FROM quay.io/fedora/fedora:${RELEASE}
+
+ARG ARCH=x86_64
 
 COPY bootc-base-dirs.conf /usr/lib/tmpfiles.d/bootc-base-dirs.conf
 COPY prepare-root.conf /usr/lib/ostree/prepare-root.conf
 COPY 30-custom-bootc-composefs-build.conf /usr/lib/dracut/dracut.conf.d/30-custom-bootc-composefs-build.conf
 
-RUN dnf install -y --setopt=install_weak_deps=false \
+RUN case "${ARCH}" in \
+        x86_64) bootloader_packages="grub2-efi-x64 shim-x64" ;; \
+        aarch64) bootloader_packages="grub2-efi-aa64 shim-aa64" ;; \
+        *) echo "Unsupported ARCH: ${ARCH}" >&2; exit 1 ;; \
+    esac && \
+    dnf install -y --setopt=install_weak_deps=false \
     bootc \
     bootupd \
     container-selinux \
@@ -14,19 +22,17 @@ RUN dnf install -y --setopt=install_weak_deps=false \
     e2fsprogs \
     efibootmgr \
     fedora-repos-archive \
-    grub2-efi-aa64 \
-    shim-aa64 \
     kernel \
     nss-altfiles \
     ostree \
     selinux-policy-targeted \
-    shim \
     systemd \
     systemd-boot-unsigned \
     systemd-pam \
     systemd-resolved \
     tpm2-tools \
-    xfsprogs
+    xfsprogs \
+    ${bootloader_packages}
 
 RUN rm -rf /boot /home /mnt /root /usr/local /src /opt /var /usr/lib/sysimage/log && \
     mkdir -p /sysroot /boot /usr/lib/ostree /var && \
@@ -39,8 +45,13 @@ RUN rm -rf /boot /home /mnt /root /usr/local /src /opt /var /usr/lib/sysimage/lo
 
 RUN ls /usr/lib/tmpfiles.d /usr/lib/ostree /usr/lib/dracut/dracut.conf.d
 
-RUN mkdir /var/tmp && export DRACUT_NO_XATTR=1 && \
-    dracut --force --verbose "$(find /usr/lib/modules -maxdepth 1 -type d | grep -v -E "*.img" | tail -n 1)/initramfs.img" && \
+RUN mkdir -p /var/tmp && export DRACUT_NO_XATTR=1 && \
+    test "$(rpm -q kernel-core | wc -l)" -eq 1 && \
+    kernel_version="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-core)" && \
+    test -d "/usr/lib/modules/${kernel_version}" && \
+    dracut --force --verbose \
+        "/usr/lib/modules/${kernel_version}/initramfs.img" \
+        "${kernel_version}" && \
     rm -rf /var/tmp
 
 RUN bootupctl backend generate-update-metadata

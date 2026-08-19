@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 
-set -xeu
+set -xeuo pipefail
 
 # defaults
 containerfile="Containerfile"
 name="fedora-bootc-minimal"
-rel="43"
+rel="44"
+arch="x86_64"
 ts="main"
+
+declare -a tss=()
+declare -a tagged_names=()
+declare -a tag_opts=()
 
 assert_not_empty() {
     local argn="$1"
@@ -18,8 +23,12 @@ assert_not_empty() {
     fi
 }
 
-while getopts ":c:d:n:r:s:" opt; do
+while getopts ":a:c:d:n:r:s:" opt; do
     case ${opt} in
+        a)
+            assert_not_empty "a" "$OPTARG"
+            arch="$OPTARG"
+            ;;
         c)
             assert_not_empty "c" "$OPTARG"
             containerfile="$OPTARG"
@@ -52,8 +61,21 @@ while getopts ":c:d:n:r:s:" opt; do
     esac
 done
 
+case "${arch}" in
+    x86_64)
+        platform_arch="amd64"
+        ;;
+    aarch64)
+        platform_arch="arm64"
+        ;;
+    *)
+        echo "Invalid argument for -a: unsupported architecture: ${arch}" >&2
+        exit 2
+        ;;
+esac
+
 # construct image names with suffixed tags
-if [ -v tss ]; then
+if ((${#tss[@]})); then
     for t in "${tss[@]}"; do
         tagged_names+=("${name}:${rel}-${t}")
     done
@@ -67,7 +89,13 @@ for n in "${tagged_names[@]}"; do
 done
 
 # build the container
-podman build --security-opt=label=disable --cap-add=all --device /dev/fuse --build-arg RELEASE="${rel}" "${tag_opts[@]}" -f "${containerfile}" .
+podman build \
+    --platform "linux/${platform_arch}" \
+    --build-arg RELEASE="${rel}" \
+    --build-arg ARCH="${arch}" \
+    "${tag_opts[@]}" \
+    -f "${containerfile}" \
+    .
 
 # push if a registry was specified
 if [ -v registry ]; then

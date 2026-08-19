@@ -1,4 +1,4 @@
-name: Build and push ostree container
+name: Build and push bootc container
 
 on:
   workflow_dispatch:
@@ -15,26 +15,34 @@ on:
 jobs:
   build:
     if: contains(fromJson('["main","test","stage","next","poc"]'), github.ref_name)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.target_arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       packages: write
-    container:
-      image: quay.io/podman/stable:v5
-      options: "--user root --privileged -v /var/tmp:/var/tmp -v /tmp:/tmp"
     strategy:
       matrix:
         release_version:
           - "43"
           - "44"
+        target_arch:
+          - "x86_64"
+          - "aarch64"
     steps:
       - uses: actions/checkout@v4
       - name: Login to registry
-        run: podman login --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} ghcr.io
-      - name: Build ostree container
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${REGISTRY_PASSWORD}" | podman login --username "${{ github.actor }}" --password-stdin ghcr.io
+      - name: Build bootc container
         run: |
           branch_tag=$(printf '%s' "${{ github.ref_name }}" \
               | tr '[:upper:]' '[:lower:]' \
               | sed -E 's#[^a-z0-9_.-]+#-#g; s#^[.-]+##; s#[.-]+$##' \
               | cut -c1-100)
-          ./build.sh -d ghcr.io -r ${{ matrix.release_version }} -n "${GITHUB_REPOSITORY,,}" -s "${branch_tag}" -s "${{ github.sha }}"
+          ./build.sh \
+              -a "${{ matrix.target_arch }}" \
+              -d ghcr.io \
+              -r "${{ matrix.release_version }}" \
+              -n "${GITHUB_REPOSITORY,,}" \
+              -s "${branch_tag}-${{ matrix.target_arch }}" \
+              -s "${{ github.sha }}-${{ matrix.target_arch }}"
