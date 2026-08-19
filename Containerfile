@@ -1,18 +1,11 @@
 ARG RELEASE=44
 FROM quay.io/fedora/fedora:${RELEASE}
 
-ARG ARCH=x86_64
-
 COPY bootc-base-dirs.conf /usr/lib/tmpfiles.d/bootc-base-dirs.conf
 COPY prepare-root.conf /usr/lib/ostree/prepare-root.conf
 COPY 30-custom-bootc-composefs-build.conf /usr/lib/dracut/dracut.conf.d/30-custom-bootc-composefs-build.conf
 
-RUN case "${ARCH}" in \
-        x86_64) bootloader_packages="grub2-efi-x64 shim-x64" ;; \
-        aarch64) bootloader_packages="grub2-efi-aa64 shim-aa64" ;; \
-        *) echo "Unsupported ARCH: ${ARCH}" >&2; exit 1 ;; \
-    esac && \
-    dnf install -y --setopt=install_weak_deps=false \
+RUN dnf install -y --setopt=install_weak_deps=false \
     bootc \
     bootupd \
     container-selinux \
@@ -22,17 +15,18 @@ RUN case "${ARCH}" in \
     e2fsprogs \
     efibootmgr \
     fedora-repos-archive \
+    grub2-efi \
     kernel \
     nss-altfiles \
     ostree \
     selinux-policy-targeted \
+    shim \
     systemd \
     systemd-boot-unsigned \
     systemd-pam \
     systemd-resolved \
     tpm2-tools \
-    xfsprogs \
-    ${bootloader_packages}
+    xfsprogs
 
 RUN rm -rf /boot /home /mnt /root /usr/local /src /opt /var /usr/lib/sysimage/log && \
     mkdir -p /sysroot /boot /usr/lib/ostree /var && \

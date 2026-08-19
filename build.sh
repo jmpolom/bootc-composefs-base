@@ -92,7 +92,6 @@ done
 podman build \
     --platform "linux/${platform_arch}" \
     --build-arg RELEASE="${rel}" \
-    --build-arg ARCH="${arch}" \
     "${tag_opts[@]}" \
     -f "${containerfile}" \
     .
