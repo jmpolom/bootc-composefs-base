@@ -1,0 +1,40 @@
+name: Build and push ostree container
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 19 * * 6'
+  push:
+    branches:
+      - "main"
+      - "test"
+      - "stage"
+      - "next"
+      - "poc"
+
+jobs:
+  build:
+    if: contains(fromJson('["main","test","stage","next","poc"]'), github.ref_name)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    container:
+      image: quay.io/podman/stable:v5
+      options: "--user root --privileged -v /var/tmp:/var/tmp -v /tmp:/tmp"
+    strategy:
+      matrix:
+        release_version:
+          - "43"
+          - "44"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to registry
+        run: podman login --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} ghcr.io
+      - name: Build ostree container
+        run: |
+          branch_tag=$(printf '%s' "${{ github.ref_name }}" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's#[^a-z0-9_.-]+#-#g; s#^[.-]+##; s#[.-]+$##' \
+              | cut -c1-100)
+          ./build.sh -d ghcr.io -r ${{ matrix.release_version }} -n "${GITHUB_REPOSITORY,,}" -s "${branch_tag}" -s "${{ github.sha }}"
