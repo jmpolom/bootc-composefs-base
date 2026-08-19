@@ -22,6 +22,7 @@ RUN dnf install -y --setopt=install_weak_deps=false \
     kernel \
     nss-altfiles \
     ostree \
+    policycoreutils \
     selinux-policy-targeted \
     shim \
     systemd \
@@ -58,6 +59,8 @@ RUN useradd -U -c 'delete me' \
             -d /var/home/default \
             -p '$y$j9T$kq/3XQD3zBDpUAOaxEZMj0$dbUPks0Mk8u0vh/XnAoFgPkffy7kx.Fb9ETyRJo6FP2' \
             default
+
+COPY installers/ /usr/libexec/bootc-installer/
 
 RUN bootc container lint
 
