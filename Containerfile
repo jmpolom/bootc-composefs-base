@@ -24,6 +24,7 @@ RUN dnf install -y --setopt=install_weak_deps=false \
     gdisk \
     grub2-efi \
     iproute \
+    iputils \
     kernel \
     nss-altfiles \
     ostree \
