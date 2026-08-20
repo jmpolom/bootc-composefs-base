@@ -57,8 +57,8 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -p PATH     Mount point for the encrypted extra disk.      [EXTRA_MOUNT_POINT]
   -P FILE     Retained LUKS password file for both disks.    [LUKS_PASSWORD_FILE]
   -k FILE     Host recovery-key output file.                 [RECOVERY_KEY_FILE]
-  -d SIZE     Target qcow2 size.                             [TARGET_DISK_SIZE]
-  -e SIZE     Extra qcow2 size.                              [EXTRA_DISK_SIZE]
+  -d SIZE     Target NVMe qcow2 size.                        [TARGET_DISK_SIZE]
+  -e SIZE     Extra NVMe qcow2 size.                         [EXTRA_DISK_SIZE]
   -t SIZE     Temporary-storage qcow2 size.                  [SCRATCH_DISK_SIZE]
   -m MEMORY   Guest memory.                                  [QEMU_MEMORY]
   -c CPUS     Guest CPU count.                               [QEMU_CPUS]
@@ -237,6 +237,8 @@ initialize_paths() {
     GUEST_INSTALL_CONFIG=$GUEST_PERSISTENT_DIR/install.conf
     GUEST_RECOVERY_FILE=$GUEST_RUNTIME_DIR/recovery-keys.txt
     GUEST_PASSWORD_FILE=$GUEST_PERSISTENT_DIR/luks-password
+    GUEST_TARGET_DISK=/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_bootc-root_1
+    GUEST_EXTRA_DISK=/dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_bootc-extra_1
     RECOVERY_PORT_NAME=org.test-install-qemu-bootc.recovery
     RECOVERY_PORT=/dev/virtio-ports/$RECOVERY_PORT_NAME
 
@@ -468,7 +470,7 @@ create_installer_config() {
     fi
 
     {
-        printf 'target_disk=%q\n' /dev/disk/by-id/virtio-bootc-root
+        printf 'target_disk=%q\n' "$GUEST_TARGET_DISK"
         printf 'source_imgref=\n'
         printf 'target_imgref=\n'
         printf 'install_root=%q\n' "$GUEST_RUNTIME_DIR/install-root"
@@ -486,7 +488,7 @@ create_installer_config() {
             printf 'luks_ephemeral_key=true\n'
             printf 'luks_password_file=\n'
         fi
-        printf 'extra_mount_devices=(%q)\n' /dev/disk/by-id/virtio-bootc-extra
+        printf 'extra_mount_devices=(%q)\n' "$GUEST_EXTRA_DISK"
         printf 'extra_mount_points=(%q)\n' "$EXTRA_MOUNT_POINT"
         printf 'extra_mount_filesystems=(btrfs)\n'
         printf 'extra_mount_encrypted=(true)\n'
@@ -511,6 +513,8 @@ create_live_wrapper() {
         printf 'runtime_dir=%q\n' "$GUEST_RUNTIME_DIR"
         printf 'recovery_file=%q\n' "$GUEST_RECOVERY_FILE"
         printf 'recovery_port=%q\n' "$RECOVERY_PORT"
+        printf 'target_device=%q\n' "$GUEST_TARGET_DISK"
+        printf 'extra_device=%q\n' "$GUEST_EXTRA_DISK"
         printf 'scratch_device=%q\n' /dev/disk/by-id/virtio-bootc-scratch
         cat <<'EOF'
 set -Eeuo pipefail
@@ -579,6 +583,39 @@ trap 'exit 143' TERM
 
 require_full_capabilities
 udevadm settle --timeout=30
+for nvme_controller in /dev/nvme0 /dev/nvme1; do
+    [[ -c $nvme_controller ]] || {
+        echo "Expected NVMe controller did not appear: $nvme_controller" >&2
+        ls -l /dev/nvme* >&2 || true
+        exit 1
+    }
+done
+[[ $(sed 's/[[:space:]]*$//' /sys/class/nvme/nvme0/serial) == bootc-root ]] || {
+    echo "nvme0 is not the target-disk controller" >&2
+    exit 1
+}
+[[ $(sed 's/[[:space:]]*$//' /sys/class/nvme/nvme1/serial) == bootc-extra ]] || {
+    echo "nvme1 is not the extra-disk controller" >&2
+    exit 1
+}
+for nvme_device in /dev/nvme0n1 /dev/nvme1n1; do
+    [[ -b $nvme_device ]] || {
+        echo "Expected NVMe storage device did not appear: $nvme_device" >&2
+        lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL >&2
+        exit 1
+    }
+done
+[[ -b $target_device && $(readlink -f -- "$target_device") == /dev/nvme0n1 ]] || {
+    echo "Target NVMe by-id link is missing or resolves incorrectly: $target_device" >&2
+    ls -l /dev/disk/by-id >&2 || true
+    exit 1
+}
+[[ -b $extra_device && $(readlink -f -- "$extra_device") == /dev/nvme1n1 ]] || {
+    echo "Extra NVMe by-id link is missing or resolves incorrectly: $extra_device" >&2
+    ls -l /dev/disk/by-id >&2 || true
+    exit 1
+}
+lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL /dev/nvme0n1 /dev/nvme1n1
 [[ -b $scratch_device ]] || {
     echo "Temporary-storage disk did not appear: $scratch_device" >&2
     exit 1
@@ -723,9 +760,11 @@ base_qemu_args() {
         -drive "if=pflash,format=raw,readonly=on,file=$FIRMWARE_CODE"
         -drive "if=pflash,format=raw,file=$NVRAM_FILE"
         -drive "file=$TARGET_DISK,if=none,format=qcow2,id=rootdisk"
-        -device 'virtio-blk-pci,drive=rootdisk,serial=bootc-root,bootindex=2'
+        -device 'nvme,id=nvme0,serial=bootc-root'
+        -device 'nvme-ns,drive=rootdisk,bus=nvme0,nsid=1,bootindex=2'
         -drive "file=$EXTRA_DISK,if=none,format=qcow2,id=extradisk"
-        -device 'virtio-blk-pci,drive=extradisk,serial=bootc-extra'
+        -device 'nvme,id=nvme1,serial=bootc-extra'
+        -device 'nvme-ns,drive=extradisk,bus=nvme1,nsid=1'
         -netdev 'user,id=net0,hostname=bootc-test'
         -device 'virtio-net-pci,netdev=net0'
         -chardev "socket,id=chrtpm,path=$TPM_SOCKET"
