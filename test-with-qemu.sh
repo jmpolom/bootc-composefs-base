@@ -19,6 +19,7 @@ LUKS_PASSWORD_FILE=${LUKS_PASSWORD_FILE:-}
 RECOVERY_KEY_FILE=${RECOVERY_KEY_FILE:-}
 TARGET_DISK_SIZE=${TARGET_DISK_SIZE:-40G}
 EXTRA_DISK_SIZE=${EXTRA_DISK_SIZE:-40G}
+SCRATCH_DISK_SIZE=${SCRATCH_DISK_SIZE:-10G}
 QEMU_MEMORY=${QEMU_MEMORY:-4G}
 QEMU_CPUS=${QEMU_CPUS:-4}
 FORCE=${FORCE:-false}
@@ -58,6 +59,7 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -k FILE     Host recovery-key output file.                 [RECOVERY_KEY_FILE]
   -d SIZE     Target qcow2 size.                             [TARGET_DISK_SIZE]
   -e SIZE     Extra qcow2 size.                              [EXTRA_DISK_SIZE]
+  -t SIZE     Temporary-storage qcow2 size.                  [SCRATCH_DISK_SIZE]
   -m MEMORY   Guest memory.                                  [QEMU_MEMORY]
   -c CPUS     Guest CPU count.                               [QEMU_CPUS]
   -f          Replace existing mutable VM state.             [FORCE=true]
@@ -85,7 +87,7 @@ log() {
 
 parse_options() {
     local option
-    while getopts ':a:r:i:w:s:I:b:l:p:P:k:d:e:m:c:fh' option; do
+    while getopts ':a:r:i:w:s:I:b:l:p:P:k:d:e:t:m:c:fh' option; do
         case "$option" in
             a) QEMU_ARCH=$OPTARG ;;
             r) RUN_MODE=$OPTARG ;;
@@ -100,6 +102,7 @@ parse_options() {
             k) RECOVERY_KEY_FILE=$OPTARG ;;
             d) TARGET_DISK_SIZE=$OPTARG ;;
             e) EXTRA_DISK_SIZE=$OPTARG ;;
+            t) SCRATCH_DISK_SIZE=$OPTARG ;;
             m) QEMU_MEMORY=$OPTARG ;;
             c) QEMU_CPUS=$OPTARG ;;
             f) FORCE=true ;;
@@ -217,6 +220,7 @@ initialize_paths() {
 
     TARGET_DISK=$QEMU_WORK_DIR/target.qcow2
     EXTRA_DISK=$QEMU_WORK_DIR/extra.qcow2
+    SCRATCH_DISK=$QEMU_WORK_DIR/scratch.qcow2
     NVRAM_FILE=$QEMU_WORK_DIR/nvram.fd
     LIVE_IGNITION=$QEMU_WORK_DIR/live.ign
     LIVE_WRAPPER=$QEMU_WORK_DIR/run-install.sh
@@ -241,7 +245,7 @@ initialize_paths() {
         [[ $qemu_path_value != *,* && $qemu_path_value != *$'\n'* ]] ||
             die "QEMU paths cannot contain commas or newlines: $qemu_path_value"
     done
-    for qemu_path_value in "$TARGET_DISK" "$EXTRA_DISK" "$NVRAM_FILE"; do
+    for qemu_path_value in "$TARGET_DISK" "$EXTRA_DISK" "$SCRATCH_DISK" "$NVRAM_FILE"; do
         [[ -z $FCOS_ISO || $FCOS_ISO != "$qemu_path_value" ]] ||
             die "Fedora CoreOS ISO conflicts with mutable VM state: $FCOS_ISO"
         [[ -z $LUKS_PASSWORD_FILE || $LUKS_PASSWORD_FILE != "$qemu_path_value" ]] ||
@@ -419,6 +423,7 @@ reset_install_state() {
     local existing=false
     [[ -e $TARGET_DISK ]] && existing=true
     [[ -e $EXTRA_DISK ]] && existing=true
+    [[ -e $SCRATCH_DISK ]] && existing=true
     [[ -e $NVRAM_FILE ]] && existing=true
     [[ -d $TPM_DIR ]] && existing=true
     [[ -e $RECOVERY_KEY_FILE ]] && existing=true
@@ -427,7 +432,7 @@ reset_install_state() {
         die "mutable VM state already exists in $QEMU_WORK_DIR; use -f to replace it or -r boot to start it"
     fi
     if [[ $FORCE == true ]]; then
-        rm -f -- "$TARGET_DISK" "$EXTRA_DISK" "$NVRAM_FILE" "$LIVE_IGNITION" "$LIVE_WRAPPER" \
+        rm -f -- "$TARGET_DISK" "$EXTRA_DISK" "$SCRATCH_DISK" "$NVRAM_FILE" "$LIVE_IGNITION" "$LIVE_WRAPPER" \
             "$INSTALL_CONFIG" "$INSTALL_SERIAL_LOG" "$BOOT_SERIAL_LOG" "$MONITOR_SOCKET" "$TPM_LOG" \
             "$RECOVERY_KEY_FILE"
         rm -rf -- "$TPM_DIR"
@@ -437,6 +442,7 @@ reset_install_state() {
     chmod 0700 "$TPM_DIR"
     qemu-img create -f qcow2 "$TARGET_DISK" "$TARGET_DISK_SIZE" >/dev/null
     qemu-img create -f qcow2 "$EXTRA_DISK" "$EXTRA_DISK_SIZE" >/dev/null
+    qemu-img create -f qcow2 "$SCRATCH_DISK" "$SCRATCH_DISK_SIZE" >/dev/null
     cp -- "$FIRMWARE_VARS_TEMPLATE" "$NVRAM_FILE"
     chmod u+w "$NVRAM_FILE"
 }
@@ -505,9 +511,11 @@ create_live_wrapper() {
         printf 'runtime_dir=%q\n' "$GUEST_RUNTIME_DIR"
         printf 'recovery_file=%q\n' "$GUEST_RECOVERY_FILE"
         printf 'recovery_port=%q\n' "$RECOVERY_PORT"
+        printf 'scratch_device=%q\n' /dev/disk/by-id/virtio-bootc-scratch
         cat <<'EOF'
 set -Eeuo pipefail
 umask 077
+scratch_mounted=false
 
 finish() {
     local status=$?
@@ -529,6 +537,13 @@ finish() {
             status=1
         fi
     fi
+    if [[ $scratch_mounted == true ]]; then
+        sync
+        if ! umount /var/tmp; then
+            echo "Could not unmount temporary-storage disk from /var/tmp" >&2
+            status=1
+        fi
+    fi
     printf 'TEST_INSTALL_QEMU_BOOTC_RESULT=%d\n' "$status"
     sync
     systemctl --no-block poweroff
@@ -538,6 +553,20 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+udevadm settle --timeout=30
+[[ -b $scratch_device ]] || {
+    echo "Temporary-storage disk did not appear: $scratch_device" >&2
+    exit 1
+}
+echo "Formatting temporary-storage disk $scratch_device"
+mkfs.xfs -f -L bootc_tmp "$scratch_device"
+install -d -m 1777 /var/tmp
+mount "$scratch_device" /var/tmp
+scratch_mounted=true
+chmod 1777 /var/tmp
+findmnt --mountpoint /var/tmp
+df -h /var/tmp
 
 echo "Pulling $image_ref"
 podman pull "$image_ref"
@@ -549,6 +578,7 @@ podman run --rm --pull=never --privileged \
     --volume /dev:/dev \
     --volume /run/udev:/run/udev:ro \
     --volume /var/lib/containers:/var/lib/containers \
+    --volume /var/tmp:/var/tmp \
     --volume "$persistent_dir:$persistent_dir:ro" \
     --volume "$runtime_dir:$runtime_dir" \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
@@ -694,6 +724,8 @@ start_qemu_install() {
     rm -f -- "$MONITOR_SOCKET" "$INSTALL_SERIAL_LOG" "$RECOVERY_KEY_FILE"
     base_qemu_args
     QEMU_ARGS+=(
+        -drive "file=$SCRATCH_DISK,if=none,format=qcow2,id=scratchdisk"
+        -device 'virtio-blk-pci,drive=scratchdisk,serial=bootc-scratch'
         -drive "file=$FCOS_ISO,media=cdrom,readonly=on,if=none,id=installcd"
         -device virtio-scsi-pci
         -device 'scsi-cd,drive=installcd,bootindex=1'

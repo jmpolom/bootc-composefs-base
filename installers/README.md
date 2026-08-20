@@ -123,9 +123,11 @@ volume-specific `rd.luks.options=` argument; other encrypted volumes continue to
 
 The project-level `test-with-qemu.sh` harness supports native AArch64 and x86-64 QEMU on macOS and
 Linux. Its default `install` mode downloads and verifies the latest Fedora CoreOS live ISO, creates
-two encrypted Btrfs disks, installs a caller-supplied bootc image with the composefs/GRUB path, saves
-both recovery keys, and powers off. Run it a second time with `-r boot` to start the installed VM, or
-use `-r all` to chain both stages. All generated state defaults to `.qemu-test/`.
+two encrypted Btrfs installation disks and a temporary XFS scratch disk, installs a caller-supplied
+bootc image with the composefs/GRUB path, saves both recovery keys, and powers off. The scratch disk
+is mounted at `/var/tmp` in the live VM before Podman starts so bootc's mirrored host temporary
+storage has adequate capacity. Run the harness a second time with `-r boot` to start the installed
+VM, or use `-r all` to chain both stages. All generated state defaults to `qemu-test/`.
 
 ```bash
 ./test-with-qemu.sh -i ghcr.io/example/os:tag
