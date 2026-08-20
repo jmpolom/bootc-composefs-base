@@ -756,6 +756,10 @@ run_bootc_install() {
     rm -rf -- "$bootc_tmpdir"
     mkdir -p "$bootc_tmpdir"
     chmod 0700 "$bootc_tmpdir"
+    log "Binding target-backed bootc scratch directory onto /var/tmp"
+    mount --bind "$bootc_tmpdir" /var/tmp
+    cleanup_mounts+=(/var/tmp)
+
     log "bootc arguments: ${bootc_args[*]}"
     log "Starting bootc deployment"
     if RUST_LOG=$rust_log TMPDIR=$bootc_tmpdir bootc "${bootc_args[@]}" "$install_root"; then
@@ -763,6 +767,9 @@ run_bootc_install() {
     else
         status=$?
     fi
+
+    umount /var/tmp
+    unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
     rm -rf -- "$bootc_tmpdir"
     umount "$bootc_tmp_mount"
     unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"

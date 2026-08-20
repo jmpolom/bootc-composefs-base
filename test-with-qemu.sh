@@ -553,7 +553,7 @@ podman run --rm --pull=never --privileged \
     --volume "$runtime_dir:$runtime_dir" \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
     "$image_ref" \
-    -c "$install_config" -y
+    -c "$install_config" -y -t
 [[ $(wc -l <"$recovery_file") -eq 2 ]] || {
     echo "Expected two recovery-key records" >&2
     exit 1
