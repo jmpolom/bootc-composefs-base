@@ -807,16 +807,13 @@ start_qemu_install() {
     wait_for_socket "$MONITOR_SOCKET" 30
 }
 
-start_qemu_boot() {
+prepare_qemu_boot() {
     rm -f -- "$MONITOR_SOCKET" "$BOOT_SERIAL_LOG"
     base_qemu_args
     QEMU_ARGS+=(
         -boot 'order=c'
     )
     add_serial_console "$BOOT_SERIAL_LOG"
-    "$QEMU_SYSTEM" "${QEMU_ARGS[@]}" &
-    QEMU_PID=$!
-    wait_for_socket "$MONITOR_SOCKET" 30
 }
 
 hmp_command() {
@@ -922,15 +919,14 @@ run_install() {
 
 run_boot() {
     start_swtpm
-    start_qemu_boot
+    prepare_qemu_boot
     log "Installed VM is running; serial output is displayed and logged to $BOOT_SERIAL_LOG"
     local status
-    if wait "$QEMU_PID"; then
+    if "$QEMU_SYSTEM" "${QEMU_ARGS[@]}"; then
         status=0
     else
         status=$?
     fi
-    QEMU_PID=
     stop_swtpm
     return "$status"
 }
