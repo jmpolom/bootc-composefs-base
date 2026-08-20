@@ -6,12 +6,14 @@ COPY prepare-root.conf /usr/lib/ostree/prepare-root.conf
 COPY 30-custom-bootc-composefs-build.conf /usr/lib/dracut/dracut.conf.d/30-custom-bootc-composefs-build.conf
 
 RUN dnf install -y --setopt=install_weak_deps=false \
+    audit \
     bootc \
     bootupd \
     btrfs-progs \
     container-selinux \
     coreutils \
     cryptsetup \
+    dbus-broker \
     dnf \
     dosfstools \
     e2fsprogs \
