@@ -8,6 +8,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 QEMU_ARCH=${QEMU_ARCH:-$(uname -m)}
 RUN_MODE=${RUN_MODE:-install}
 BOOTC_IMAGE=${BOOTC_IMAGE:-}
+BOOTC_SOURCE_IMGREF=
+PODMAN_IMAGE_REF=
 QEMU_WORK_DIR=${QEMU_WORK_DIR:-$SCRIPT_DIR/qemu-test}
 FCOS_STREAM=${FCOS_STREAM:-stable}
 FCOS_ISO=${FCOS_ISO:-}
@@ -44,7 +46,9 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
 
   -a ARCH     Native architecture: x86_64 or aarch64.       [QEMU_ARCH]
   -r MODE     Run mode: install, boot, or all.               [RUN_MODE]
-  -i IMAGE    Bootc image; required for install and all.     [BOOTC_IMAGE]
+  -i IMAGE    Docker Registry bootc image; required for      [BOOTC_IMAGE]
+              install and all. An optional docker:// prefix
+              is accepted.
   -w DIR      Working directory below the project root.      [QEMU_WORK_DIR]
   -s STREAM   Fedora CoreOS stream.                          [FCOS_STREAM]
   -I ISO      Use this Fedora CoreOS live ISO.               [FCOS_ISO]
@@ -120,6 +124,25 @@ normalize_architecture() {
     esac
 }
 
+normalize_bootc_image_reference() {
+    case "$BOOTC_IMAGE" in
+        docker://?*)
+            BOOTC_SOURCE_IMGREF=$BOOTC_IMAGE
+            PODMAN_IMAGE_REF=${BOOTC_IMAGE#docker://}
+            ;;
+        docker://)
+            die "docker:// must be followed by a container image reference"
+            ;;
+        *://*)
+            die "the QEMU test supports Docker Registry image references only: $BOOTC_IMAGE"
+            ;;
+        *)
+            BOOTC_SOURCE_IMGREF=docker://$BOOTC_IMAGE
+            PODMAN_IMAGE_REF=$BOOTC_IMAGE
+            ;;
+    esac
+}
+
 absolute_existing_path() {
     local path=$1
     local directory basename
@@ -158,6 +181,7 @@ validate_configuration() {
     [[ $RUN_MODE != boot || $FORCE == false ]] || die "-f is not valid in boot mode"
     if [[ $RUN_MODE != boot ]]; then
         [[ -n $BOOTC_IMAGE ]] || die "a bootc image is required for $RUN_MODE mode (-i or BOOTC_IMAGE)"
+        normalize_bootc_image_reference
     fi
 
     if [[ -n $LUKS_PASSWORD_FILE ]]; then
@@ -442,7 +466,7 @@ create_installer_config() {
 
     {
         printf 'target_disk=%q\n' /dev/disk/by-id/virtio-bootc-root
-        printf 'source_imgref=%q\n' "$BOOTC_IMAGE"
+        printf 'source_imgref=%q\n' "$BOOTC_SOURCE_IMGREF"
         printf 'target_imgref=\n'
         printf 'work_root=%q\n' "$GUEST_RUNTIME_DIR"
         printf 'bootloader=%q\n' "$BOOTLOADER"
@@ -476,7 +500,7 @@ create_live_wrapper() {
     local installer_name=install-$INSTALLER_BACKEND.sh
     {
         printf '#!/usr/bin/env bash\n'
-        printf 'image_ref=%q\n' "$BOOTC_IMAGE"
+        printf 'image_ref=%q\n' "$PODMAN_IMAGE_REF"
         printf 'installer_name=%q\n' "$installer_name"
         printf 'install_config=%q\n' "$GUEST_INSTALL_CONFIG"
         printf 'runtime_dir=%q\n' "$GUEST_RUNTIME_DIR"

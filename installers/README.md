@@ -28,7 +28,8 @@ example, `rust_log=bootc=debug` enables bootc debug logs.
 Leave `source_imgref` empty when the installer runs inside the image that it should install. In that
 mode bootc discovers the running container through Podman, so invoke it from a rootful, privileged
 container with the host PID namespace (`--pid=host`). Set `source_imgref` only when installing a
-different image reference.
+different image, and use a containers/image transport-qualified reference such as
+`docker://quay.io/example/os:latest`.
 
 The env file is sourced as trusted Bash code. By default each encrypted volume is initialized and
 opened through interactive passphrase prompts. For automation, set `luks_ephemeral_key=true` to use
