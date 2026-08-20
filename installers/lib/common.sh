@@ -745,9 +745,15 @@ append_state_kargs() {
 }
 
 run_bootc_install() {
-    local bootc_tmpdir=$install_root/.bootc-tmp
+    local bootc_tmp_mount=$work_root/bootc-tmp-fs
+    local bootc_tmpdir=$bootc_tmp_mount/.bootc-tmp
     local status
 
+    mkdir -p "$bootc_tmp_mount"
+    mount -o subvolid=5 /dev/disk/by-label/root "$bootc_tmp_mount"
+    cleanup_mounts+=("$bootc_tmp_mount")
+
+    rm -rf -- "$bootc_tmpdir"
     mkdir -p "$bootc_tmpdir"
     chmod 0700 "$bootc_tmpdir"
     log "bootc arguments: ${bootc_args[*]}"
@@ -758,6 +764,8 @@ run_bootc_install() {
         status=$?
     fi
     rm -rf -- "$bootc_tmpdir"
+    umount "$bootc_tmp_mount"
+    unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
     return "$status"
 }
 
