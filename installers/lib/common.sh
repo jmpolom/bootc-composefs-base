@@ -745,9 +745,20 @@ append_state_kargs() {
 }
 
 run_bootc_install() {
+    local bootc_tmpdir=$install_root/.bootc-tmp
+    local status
+
+    mkdir -p "$bootc_tmpdir"
+    chmod 0700 "$bootc_tmpdir"
     log "bootc arguments: ${bootc_args[*]}"
     log "Starting bootc deployment"
-    RUST_LOG=$rust_log bootc "${bootc_args[@]}" "$install_root"
+    if RUST_LOG=$rust_log TMPDIR=$bootc_tmpdir bootc "${bootc_args[@]}" "$install_root"; then
+        status=0
+    else
+        status=$?
+    fi
+    rm -rf -- "$bootc_tmpdir"
+    return "$status"
 }
 
 move_state_to_subvolume() {

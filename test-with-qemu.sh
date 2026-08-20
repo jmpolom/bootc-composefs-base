@@ -8,7 +8,6 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 QEMU_ARCH=${QEMU_ARCH:-$(uname -m)}
 RUN_MODE=${RUN_MODE:-install}
 BOOTC_IMAGE=${BOOTC_IMAGE:-}
-BOOTC_SOURCE_IMGREF=
 PODMAN_IMAGE_REF=
 QEMU_WORK_DIR=${QEMU_WORK_DIR:-$SCRIPT_DIR/qemu-test}
 FCOS_STREAM=${FCOS_STREAM:-stable}
@@ -127,7 +126,6 @@ normalize_architecture() {
 normalize_bootc_image_reference() {
     case "$BOOTC_IMAGE" in
         docker://?*)
-            BOOTC_SOURCE_IMGREF=$BOOTC_IMAGE
             PODMAN_IMAGE_REF=${BOOTC_IMAGE#docker://}
             ;;
         docker://)
@@ -137,7 +135,6 @@ normalize_bootc_image_reference() {
             die "the QEMU test supports Docker Registry image references only: $BOOTC_IMAGE"
             ;;
         *)
-            BOOTC_SOURCE_IMGREF=docker://$BOOTC_IMAGE
             PODMAN_IMAGE_REF=$BOOTC_IMAGE
             ;;
     esac
@@ -466,8 +463,9 @@ create_installer_config() {
 
     {
         printf 'target_disk=%q\n' /dev/disk/by-id/virtio-bootc-root
-        printf 'source_imgref=%q\n' "$BOOTC_SOURCE_IMGREF"
+        printf 'source_imgref=\n'
         printf 'target_imgref=\n'
+        printf 'install_root=%q\n' "$GUEST_RUNTIME_DIR/install-root"
         printf 'work_root=%q\n' "$GUEST_RUNTIME_DIR"
         printf 'bootloader=%q\n' "$BOOTLOADER"
         printf 'root_encrypted=true\n'
@@ -502,22 +500,19 @@ create_live_wrapper() {
         printf '#!/usr/bin/env bash\n'
         printf 'image_ref=%q\n' "$PODMAN_IMAGE_REF"
         printf 'installer_name=%q\n' "$installer_name"
+        printf 'persistent_dir=%q\n' "$GUEST_PERSISTENT_DIR"
         printf 'install_config=%q\n' "$GUEST_INSTALL_CONFIG"
         printf 'runtime_dir=%q\n' "$GUEST_RUNTIME_DIR"
         printf 'recovery_file=%q\n' "$GUEST_RECOVERY_FILE"
         printf 'recovery_port=%q\n' "$RECOVERY_PORT"
         cat <<'EOF'
 set -Eeuo pipefail
-
-container_id=
+umask 077
 
 finish() {
     local status=$?
     trap - EXIT INT TERM
     set +e
-    if [[ -n $container_id ]]; then
-        podman rm -f "$container_id" >/dev/null 2>&1
-    fi
     if [[ -s $recovery_file ]]; then
         local remaining=30
         while [[ ! -c $recovery_port && $remaining -gt 0 ]]; do
@@ -546,11 +541,19 @@ trap 'exit 143' TERM
 
 echo "Pulling $image_ref"
 podman pull "$image_ref"
-container_id=$(podman create "$image_ref")
-mkdir -p "$runtime_dir/extracted"
-podman cp "$container_id:/usr/libexec/bootc-installer/." "$runtime_dir/extracted/"
-chmod 0755 "$runtime_dir/extracted/$installer_name"
-"$runtime_dir/extracted/$installer_name" -c "$install_config" -y
+mkdir -p "$runtime_dir"
+podman run --rm --pull=never --privileged \
+    --pid=host \
+    --ipc=host \
+    --security-opt label=type:unconfined_t \
+    --volume /dev:/dev \
+    --volume /run/udev:/run/udev:ro \
+    --volume /var/lib/containers:/var/lib/containers \
+    --volume "$persistent_dir:$persistent_dir:ro" \
+    --volume "$runtime_dir:$runtime_dir" \
+    --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
+    "$image_ref" \
+    -c "$install_config" -y
 [[ $(wc -l <"$recovery_file") -eq 2 ]] || {
     echo "Expected two recovery-key records" >&2
     exit 1
