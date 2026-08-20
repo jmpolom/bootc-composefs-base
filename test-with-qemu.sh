@@ -516,7 +516,6 @@ create_live_wrapper() {
 set -Eeuo pipefail
 umask 077
 scratch_mounted=false
-runtime_shared=false
 
 require_full_capabilities() {
     [[ $EUID -eq 0 ]] || {
@@ -568,13 +567,6 @@ finish() {
             status=1
         fi
     fi
-    if [[ $runtime_shared == true ]]; then
-        mount --make-private "$runtime_dir"
-        if ! umount "$runtime_dir"; then
-            echo "Could not unmount shared installer runtime directory $runtime_dir" >&2
-            status=1
-        fi
-    fi
     printf 'TEST_INSTALL_QEMU_BOOTC_RESULT=%d\n' "$status"
     sync
     systemctl --no-block poweroff
@@ -603,10 +595,6 @@ df -h /var/tmp
 echo "Pulling $image_ref"
 podman pull "$image_ref"
 mkdir -p "$runtime_dir"
-mount --bind "$runtime_dir" "$runtime_dir"
-mount --make-rshared "$runtime_dir"
-runtime_shared=true
-findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION --mountpoint "$runtime_dir"
 podman run --rm --pull=never --privileged \
     --user 0:0 \
     --userns host \
@@ -614,11 +602,12 @@ podman run --rm --pull=never --privileged \
     --pid=host \
     --ipc=host \
     --security-opt label=type:unconfined_t \
-    --mount type=bind,source=/dev,destination=/dev \
-    --mount type=bind,source=/run/udev,destination=/run/udev,readonly=true \
-    --mount type=bind,source=/var/lib/containers,destination=/var/lib/containers \
-    --mount "type=bind,source=$persistent_dir,destination=$persistent_dir,readonly=true" \
-    --mount "type=bind,source=$runtime_dir,destination=$runtime_dir,bind-propagation=rshared" \
+    --volume /dev:/dev \
+    --volume /run/udev:/run/udev:ro \
+    --volume /var/lib/containers:/var/lib/containers \
+    --volume /var/tmp:/var/tmp \
+    --volume "$persistent_dir:$persistent_dir:ro" \
+    --volume "$runtime_dir:$runtime_dir" \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
     "$image_ref" \
     -c "$install_config" -y -t

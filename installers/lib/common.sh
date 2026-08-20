@@ -396,7 +396,7 @@ validate_common_config() {
 }
 
 initialize_recovery_key_output() {
-    [[ -n $recovery_key_output_file ]] || return
+    [[ -n $recovery_key_output_file ]] || return 0
 
     local output_dir=${recovery_key_output_file%/*}
     [[ -n $output_dir ]] || output_dir=/
@@ -432,7 +432,7 @@ remove_temporary_luks_key() {
     local key_file=$1
     local index
 
-    [[ $luks_ephemeral_key == true && -n $key_file ]] || return
+    [[ $luks_ephemeral_key == true && -n $key_file ]] || return 0
     rm -f -- "$key_file"
     for ((index = 0; index < ${#temporary_luks_key_files[@]}; index++)); do
         if [[ ${temporary_luks_key_files[$index]} == "$key_file" ]]; then
@@ -525,6 +525,8 @@ format_filesystems() {
     log "Formatting boot filesystems"
     mkfs.vfat -F 32 -n boot_efi "$efi_partition"
     mkfs.ext4 -F -L boot "$boot_partition"
+    boot_filesystem_uuid=$(blkid -s UUID -o value "$boot_partition")
+    [[ -n $boot_filesystem_uuid ]] || die "could not determine /boot filesystem UUID"
 
     root_block_device=$root_partition
     if [[ $root_encrypted == true ]]; then
@@ -565,7 +567,7 @@ enroll_luks_credentials() {
     local tpm2_recovery=$6
     local unlock_key_file=${7:-}
 
-    [[ $tpm2 == true ]] || return
+    [[ $tpm2 == true ]] || return 0
 
     local -a unlock_args=()
     [[ -n $unlock_key_file ]] && unlock_args+=("--unlock-key-file=$unlock_key_file")
@@ -603,7 +605,7 @@ format_extra_filesystem() {
 
 prepare_extra_filesystems() {
     local count=${#extra_mount_devices[@]}
-    ((count > 0)) || return
+    ((count > 0)) || return 0
 
     log "Preparing $count additional state disk(s)"
     local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid key_file
@@ -695,7 +697,7 @@ prepare_storage() {
 append_common_kargs() {
     bootc_args+=(
         "--root-mount-spec=/dev/disk/by-label/root"
-        "--boot-mount-spec=/dev/disk/by-label/boot"
+        "--boot-mount-spec=UUID=$boot_filesystem_uuid"
         "--karg=rootfstype=btrfs"
         "--karg=rootflags=subvol=root,$root_mount_options"
     )
@@ -827,7 +829,7 @@ clear_directory() {
 configure_extra_mounts() {
     local persistent_var=$1
     local count=${#extra_mount_devices[@]}
-    ((count > 0)) || return
+    ((count > 0)) || return 0
 
     local index label filesystem options mount_point source staging state_path
     for ((index = 0; index < count; index++)); do
@@ -869,7 +871,7 @@ configure_extra_mounts() {
 configure_first_user() {
     local config_root=$1
     local persistent_var=$2
-    [[ -n ${user_name:-} ]] || return
+    [[ -n ${user_name:-} ]] || return 0
 
     [[ -f $config_root/etc/passwd ]] || die "target passwd file is missing"
     grep -q '^wheel:' "$config_root/etc/group" || die "target image does not define the wheel group"
@@ -910,8 +912,8 @@ configure_first_user() {
 relabel_target_paths() {
     local config_root=$1
     local contexts=$config_root/etc/selinux/targeted/contexts/files/file_contexts
-    command -v setfiles >/dev/null 2>&1 || return
-    [[ -r $contexts ]] || return
+    command -v setfiles >/dev/null 2>&1 || return 0
+    [[ -r $contexts ]] || return 0
 
     log "Applying target SELinux labels to mutable state"
     setfiles -F -r "$config_root" "$contexts" "$config_root/etc" ||

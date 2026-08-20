@@ -130,10 +130,11 @@ storage has adequate capacity. Run the harness a second time with `-r boot` to s
 VM, or use `-r all` to chain both stages. All generated state defaults to `qemu-test/`.
 
 The live installer service and its Podman container both require UID 0 and the complete capability
-set; the test aborts before modifying disks if either layer is restricted. The installer runtime
-directory is a shared host mount passed with Podman's structured `--mount` syntax and `rshared`
-propagation. Consequently, the nested target, `/boot`, and EFI mounts remain visible when bootc
-changes or re-executes its mount namespace.
+set; the test aborts before modifying disks if either layer is restricted. The harness mounts the
+temporary-storage disk at `/var/tmp` in the live system and passes that mount into the installer
+container. This is required because bootc mirrors `/var/tmp` from the host mount namespace during
+install preparation; creating the directory or mounting scratch only inside the container is not
+sufficient.
 
 ```bash
 ./test-with-qemu.sh -i ghcr.io/example/os:tag
