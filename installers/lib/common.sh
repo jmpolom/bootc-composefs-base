@@ -4,6 +4,7 @@
 
 declare -ag cleanup_mounts=()
 declare -ag opened_luks_names=()
+declare -ag temporary_luks_key_files=()
 declare -ag extra_mount_labels_resolved=()
 declare -ag extra_mount_runtime_paths=()
 declare -ag extra_mount_luks_uuids=()
@@ -68,6 +69,9 @@ set_defaults() {
     root_tpm2=${root_tpm2:-false}
     root_tpm2_pcrs=${root_tpm2_pcrs:-}
     root_tpm2_recovery=${root_tpm2_recovery:-false}
+    luks_ephemeral_key=${luks_ephemeral_key:-false}
+    luks_password_file=${luks_password_file:-}
+    recovery_key_output_file=${recovery_key_output_file:-}
     separate_var=${separate_var:-false}
     separate_home=${separate_home:-false}
     separate_opt=${separate_opt:-false}
@@ -305,9 +309,16 @@ validate_common_config() {
     [[ $boot_size_mib =~ ^[0-9]+$ && $boot_size_mib -ge 512 ]] || die "boot_size_mib must be at least 512"
 
     local setting
-    for setting in root_encrypted root_tpm2 root_tpm2_recovery separate_var separate_home separate_opt; do
+    for setting in root_encrypted root_tpm2 root_tpm2_recovery luks_ephemeral_key separate_var separate_home separate_opt; do
         is_boolean "${!setting}" || die "$setting must be true or false"
     done
+
+    [[ ! ($luks_ephemeral_key == true && -n $luks_password_file) ]] ||
+        die "luks_ephemeral_key and luks_password_file are mutually exclusive"
+    if [[ -n $luks_password_file ]]; then
+        [[ -f $luks_password_file && -r $luks_password_file ]] ||
+            die "luks_password_file is not a readable regular file: $luks_password_file"
+    fi
 
     [[ $root_tpm2_pcrs != *$'\n'* ]] || die "root_tpm2_pcrs cannot contain a newline"
     if [[ $root_tpm2 == true ]]; then
@@ -339,12 +350,82 @@ validate_common_config() {
     ((disk_size >= minimum_size)) || die "target disk is too small for the requested layout"
 
     require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
-        lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mount mv readlink realpath rm sgdisk sync udevadm umount \
+        dd install lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sgdisk sync udevadm umount \
         touch useradd usermod wipefs
     validate_extra_mount_config
+
+    local recovery_requested=$root_tpm2_recovery
+    local index
+    for ((index = 0; index < ${#extra_mount_devices[@]}; index++)); do
+        if [[ ${extra_mount_tpm2_recovery[$index]:-false} == true ]]; then
+            recovery_requested=true
+        fi
+        if [[ $luks_ephemeral_key == true && ${extra_mount_encrypted[$index]:-false} == true && \
+              ${extra_mount_tpm2_recovery[$index]:-false} != true ]]; then
+            die "luks_ephemeral_key requires a recovery key for encrypted extra mount: ${extra_mount_points[$index]}"
+        fi
+    done
+    if [[ $luks_ephemeral_key == true && $root_encrypted == true && $root_tpm2_recovery != true ]]; then
+        die "luks_ephemeral_key requires root_tpm2_recovery=true for encrypted root"
+    fi
+    if [[ $recovery_requested == true ]]; then
+        [[ -n $recovery_key_output_file ]] ||
+            die "recovery_key_output_file is required when recovery enrollment is enabled"
+        [[ $recovery_key_output_file == /* ]] || die "recovery_key_output_file must be absolute"
+        [[ $(realpath -m -- "$recovery_key_output_file") == "$recovery_key_output_file" ]] ||
+            die "recovery_key_output_file is not normalized: $recovery_key_output_file"
+        [[ ! -L $recovery_key_output_file ]] || die "recovery_key_output_file must not be a symlink"
+    fi
     if [[ $tpm_enrollment_requested == true ]]; then
         require_commands systemd-cryptenroll
     fi
+}
+
+initialize_recovery_key_output() {
+    [[ -n $recovery_key_output_file ]] || return
+
+    local output_dir=${recovery_key_output_file%/*}
+    [[ -n $output_dir ]] || output_dir=/
+    mkdir -p "$output_dir"
+    [[ ! -L $recovery_key_output_file ]] || die "recovery_key_output_file must not be a symlink"
+    install -m 0600 /dev/null "$recovery_key_output_file"
+}
+
+create_ephemeral_luks_key() {
+    local output_name=$1
+    local key_file
+
+    key_file=$(mktemp "$work_root/luks-key.XXXXXX")
+    chmod 0600 "$key_file"
+    dd if=/dev/urandom of="$key_file" bs=64 count=1 status=none
+    temporary_luks_key_files+=("$key_file")
+    printf -v "$output_name" '%s' "$key_file"
+}
+
+luks_key_file_for_volume() {
+    local output_name=$1
+
+    if [[ -n $luks_password_file ]]; then
+        printf -v "$output_name" '%s' "$luks_password_file"
+    elif [[ $luks_ephemeral_key == true ]]; then
+        create_ephemeral_luks_key "$output_name"
+    else
+        printf -v "$output_name" '%s' ''
+    fi
+}
+
+remove_temporary_luks_key() {
+    local key_file=$1
+    local index
+
+    [[ $luks_ephemeral_key == true && -n $key_file ]] || return
+    rm -f -- "$key_file"
+    for ((index = 0; index < ${#temporary_luks_key_files[@]}; index++)); do
+        if [[ ${temporary_luks_key_files[$index]} == "$key_file" ]]; then
+            unset 'temporary_luks_key_files[index]'
+            break
+        fi
+    done
 }
 
 root_partition_guid() {
@@ -433,14 +514,26 @@ format_filesystems() {
 
     root_block_device=$root_partition
     if [[ $root_encrypted == true ]]; then
-        log "Creating LUKS2 container labeled root_luks; enter its initial passphrase when prompted"
-        cryptsetup luksFormat --type luks2 --label root_luks "$root_partition"
+        local root_key_file=
+        luks_key_file_for_volume root_key_file
+        if [[ -n $root_key_file ]]; then
+            log "Creating LUKS2 container labeled root_luks using a key file"
+            cryptsetup luksFormat --batch-mode --type luks2 --label root_luks --key-file "$root_key_file" "$root_partition"
+            cryptsetup open --type luks --key-file "$root_key_file" "$root_partition" "$luks_name"
+        else
+            log "Creating LUKS2 container labeled root_luks; enter its initial passphrase when prompted"
+            cryptsetup luksFormat --type luks2 --label root_luks "$root_partition"
+            log "Opening root_luks; enter its passphrase when prompted"
+            cryptsetup open --type luks "$root_partition" "$luks_name"
+        fi
         root_luks_uuid=$(cryptsetup luksUUID "$root_partition")
-        enroll_luks_credentials root "$root_partition" "$root_luks_uuid" "$root_tpm2" "$root_tpm2_pcrs" "$root_tpm2_recovery"
-        log "Opening root_luks; enter its passphrase when prompted"
-        cryptsetup open --type luks "$root_partition" "$luks_name"
         opened_luks_names+=("$luks_name")
         root_block_device=/dev/mapper/$luks_name
+        enroll_luks_credentials root "$root_partition" "$root_luks_uuid" "$root_tpm2" "$root_tpm2_pcrs" "$root_tpm2_recovery" "$root_key_file"
+        if [[ $luks_ephemeral_key == true ]]; then
+            systemd-cryptenroll --wipe-slot=password "$root_partition"
+            remove_temporary_luks_key "$root_key_file"
+        fi
     fi
 
     log "Creating Btrfs filesystem labeled root"
@@ -456,24 +549,30 @@ enroll_luks_credentials() {
     local tpm2=$4
     local tpm2_pcrs=$5
     local tpm2_recovery=$6
+    local unlock_key_file=${7:-}
 
     [[ $tpm2 == true ]] || return
 
-    # Keep the interactive passphrase slot. systemd-cryptenroll needs an existing credential
-    # for later enrollment changes, and it remains a fallback if TPM unlocking is unavailable.
+    local -a unlock_args=()
+    [[ -n $unlock_key_file ]] && unlock_args+=("--unlock-key-file=$unlock_key_file")
+
     if [[ $tpm2_recovery == true ]]; then
-        log "Enrolling a recovery key for $volume; authenticate with its passphrase when prompted"
-        printf 'luks_recovery_key_begin volume=%s luks_uuid=%s\n' "$volume" "$luks_uuid"
-        systemd-cryptenroll --recovery-key "$device" 2>&1
-        printf 'luks_recovery_key_end volume=%s luks_uuid=%s\n' "$volume" "$luks_uuid"
+        local recovery_key
+        log "Enrolling a recovery key for $volume"
+        recovery_key=$(SYSTEMD_COLORS=0 systemd-cryptenroll "${unlock_args[@]}" --recovery-key "$device")
+        [[ $recovery_key =~ ^[bcdefghijklnrtuv]{8}(-[bcdefghijklnrtuv]{8}){7}$ ]] ||
+            die "systemd-cryptenroll returned an invalid recovery key for $volume"
+        printf '%s' "$recovery_key" | cryptsetup open --test-passphrase --key-file=- "$device" ||
+            die "generated recovery key did not unlock $volume"
+        printf '%s %s\n' "$luks_uuid" "$recovery_key" >>"$recovery_key_output_file"
     fi
 
     local -a enroll_args=(--tpm2-device=auto)
     if [[ -n $tpm2_pcrs ]]; then
         enroll_args+=("--tpm2-pcrs=$tpm2_pcrs")
     fi
-    log "Enrolling TPM2 unlock for $volume; authenticate with its passphrase when prompted"
-    systemd-cryptenroll "${enroll_args[@]}" "$device"
+    log "Enrolling TPM2 unlock for $volume"
+    systemd-cryptenroll "${unlock_args[@]}" "${enroll_args[@]}" "$device"
 }
 
 format_extra_filesystem() {
@@ -493,7 +592,7 @@ prepare_extra_filesystems() {
     ((count > 0)) || return
 
     log "Preparing $count additional state disk(s)"
-    local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid
+    local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid key_file
     for ((index = 0; index < count; index++)); do
         device=${extra_mount_devices[$index]}
         device_real=$(readlink -f -- "$device")
@@ -515,15 +614,27 @@ prepare_extra_filesystems() {
         if [[ $encrypted == true ]]; then
             luks_name=${extra_mount_luks_names[$index]:-${label}_crypt}
             luks_label=${extra_mount_luks_labels[$index]}
-            log "Creating LUKS2 container $luks_label; enter its initial passphrase when prompted"
-            cryptsetup luksFormat --type luks2 --label "$luks_label" "$device_real"
+            key_file=
+            luks_key_file_for_volume key_file
+            if [[ -n $key_file ]]; then
+                log "Creating LUKS2 container $luks_label using a key file"
+                cryptsetup luksFormat --batch-mode --type luks2 --label "$luks_label" --key-file "$key_file" "$device_real"
+                cryptsetup open --type luks --key-file "$key_file" "$device_real" "$luks_name"
+            else
+                log "Creating LUKS2 container $luks_label; enter its initial passphrase when prompted"
+                cryptsetup luksFormat --type luks2 --label "$luks_label" "$device_real"
+                log "Opening $luks_label; enter its passphrase when prompted"
+                cryptsetup open --type luks "$device_real" "$luks_name"
+            fi
             uuid=$(cryptsetup luksUUID "$device_real")
-            enroll_luks_credentials "$mount_point" "$device_real" "$uuid" "$tpm2" "$tpm2_pcrs" "$tpm2_recovery"
-            log "Opening $luks_label; enter its passphrase when prompted"
-            cryptsetup open --type luks "$device_real" "$luks_name"
             opened_luks_names+=("$luks_name")
             extra_mount_luks_uuids[index]=$uuid
             block_device=/dev/mapper/$luks_name
+            enroll_luks_credentials "$mount_point" "$device_real" "$uuid" "$tpm2" "$tpm2_pcrs" "$tpm2_recovery" "$key_file"
+            if [[ $luks_ephemeral_key == true ]]; then
+                systemd-cryptenroll --wipe-slot=password "$device_real"
+                remove_temporary_luks_key "$key_file"
+            fi
         fi
 
         format_extra_filesystem "$filesystem" "$label" "$block_device"
@@ -813,6 +924,11 @@ cleanup() {
         fi
     done
 
+    local key_file
+    for key_file in "${temporary_luks_key_files[@]}"; do
+        [[ -n $key_file ]] && rm -f -- "$key_file"
+    done
+
     if [[ $status -eq 0 && $install_complete == true ]]; then
         log "Installation completed successfully"
     elif [[ $status -ne 0 ]]; then
@@ -830,4 +946,5 @@ initialize_installer() {
     set_defaults
     validate_common_config
     mkdir -p "$work_root"
+    initialize_recovery_key_output
 }

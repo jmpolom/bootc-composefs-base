@@ -30,10 +30,13 @@ mode bootc discovers the running container through Podman, so invoke it from a r
 container with the host PID namespace (`--pid=host`). Set `source_imgref` only when installing a
 different image reference.
 
-The env file is sourced as trusted Bash code. LUKS password files are intentionally unsupported;
-each encrypted volume is initialized and opened through interactive passphrase prompts. A plaintext
-user password is also unsupported; configure `user_password_hash` with a crypt-format hash or leave
-it empty to create a locked account. The target image must already grant sudo access to `wheel`.
+The env file is sourced as trusted Bash code. By default each encrypted volume is initialized and
+opened through interactive passphrase prompts. For automation, set `luks_ephemeral_key=true` to use
+a per-volume random initializer stored only under the installer's runtime directory, or set
+`luks_password_file` to use and retain the same supplied password slot on every encrypted volume.
+These settings are mutually exclusive. A plaintext user password remains unsupported; configure
+`user_password_hash` with a crypt-format hash or leave it empty to create a locked account. The
+target image must already grant sudo access to `wheel`.
 
 ## Layout
 
@@ -100,19 +103,37 @@ Leave an entry empty to omit the option and adopt the installed systemd version'
 corresponding `root_tpm2_recovery` or `extra_mount_tpm2_recovery` value to `true` to enroll a recovery
 key. Recovery enrollment is accepted only for a TPM-enabled encrypted volume.
 
-Each generated recovery key is emitted to stdout by `systemd-cryptenroll` between records like:
+When recovery enrollment is requested, `recovery_key_output_file` is required. The installer creates
+or replaces it with mode `0600` and writes one whitespace-delimited record per volume:
 
 ```text
-luks_recovery_key_begin volume=root luks_uuid=01234567-89ab-cdef-0123-456789abcdef
-... systemd-cryptenroll recovery-key output ...
-luks_recovery_key_end volume=root luks_uuid=01234567-89ab-cdef-0123-456789abcdef
+01234567-89ab-cdef-0123-456789abcdef bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv
 ```
 
-The boundaries and key/value metadata are stable for machine collection while retaining systemd's
-human-readable key and QR output. Store this output securely. The initial interactive passphrase
-slot is deliberately retained as both a boot fallback and an authentication method for future
-credential enrollment. TPM-enabled volumes receive `tpm2-device=auto` in their volume-specific
-`rd.luks.options=` argument; other encrypted volumes continue to prompt at boot.
+The first column is the LUKS UUID and the second is the raw systemd recovery key. The installer tests
+the generated key before recording it and does not write the raw key to normal logs. Store this file
+securely.
+`luks_ephemeral_key=true` requires recovery enrollment on every encrypted volume; after recovery and
+TPM enrollment succeed, all temporary password slots are removed. Interactive and supplied-password
+setups retain their password slots. TPM-enabled volumes receive `tpm2-device=auto` in their
+volume-specific `rd.luks.options=` argument; other encrypted volumes continue to prompt at boot.
+
+## Native QEMU test harness
+
+The project-level `test-with-qemu.sh` harness supports native AArch64 and x86-64 QEMU on macOS and
+Linux. Its default `install` mode downloads and verifies the latest Fedora CoreOS live ISO, creates
+two encrypted Btrfs disks, installs a caller-supplied bootc image with the composefs/GRUB path, saves
+both recovery keys, and powers off. Run it a second time with `-r boot` to start the installed VM, or
+use `-r all` to chain both stages. All generated state defaults to `.qemu-test/`.
+
+```bash
+./test-with-qemu.sh -i ghcr.io/example/os:tag
+./test-with-qemu.sh -r boot
+```
+
+Both disks are TPM2-enrolled; the extra disk defaults to `/var` and can be changed with `-p`. Existing
+VM state is never replaced unless `-f` is supplied to an install mode. See `./test-with-qemu.sh -h`
+for the complete CLI and corresponding environment variables.
 
 ## Requirements and constraints
 
