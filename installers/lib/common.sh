@@ -756,6 +756,7 @@ run_bootc_install() {
     rm -rf -- "$bootc_tmpdir"
     mkdir -p "$bootc_tmpdir"
     chmod 0700 "$bootc_tmpdir"
+    install -d -m 1777 /var/tmp
     log "Binding target-backed bootc scratch directory onto /var/tmp"
     mount --bind "$bootc_tmpdir" /var/tmp
     cleanup_mounts+=(/var/tmp)
