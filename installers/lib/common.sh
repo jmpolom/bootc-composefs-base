@@ -393,13 +393,13 @@ initialize_recovery_key_output() {
 
 create_ephemeral_luks_key() {
     local output_name=$1
-    local key_file
+    local generated_key_file
 
-    key_file=$(mktemp "$work_root/luks-key.XXXXXX")
-    chmod 0600 "$key_file"
-    dd if=/dev/urandom of="$key_file" bs=64 count=1 status=none
-    temporary_luks_key_files+=("$key_file")
-    printf -v "$output_name" '%s' "$key_file"
+    generated_key_file=$(mktemp "$work_root/luks-key.XXXXXX")
+    chmod 0600 "$generated_key_file"
+    dd if=/dev/urandom of="$generated_key_file" bs=64 count=1 status=none
+    temporary_luks_key_files+=("$generated_key_file")
+    printf -v "$output_name" '%s' "$generated_key_file"
 }
 
 luks_key_file_for_volume() {
