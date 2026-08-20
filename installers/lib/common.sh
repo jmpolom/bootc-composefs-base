@@ -364,7 +364,7 @@ validate_common_config() {
     ((disk_size >= minimum_size)) || die "target disk is too small for the requested layout"
 
     require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
-        dd install lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sgdisk sync udevadm umount \
+        dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sync udevadm umount \
         touch useradd usermod wipefs
     validate_extra_mount_config
 
@@ -524,6 +524,8 @@ prepare_partitions() {
 format_filesystems() {
     log "Formatting boot filesystems"
     mkfs.vfat -F 32 -n boot_efi "$efi_partition"
+    efi_filesystem_uuid=$(blkid -s UUID -o value "$efi_partition")
+    [[ -n $efi_filesystem_uuid ]] || die "could not determine EFI filesystem UUID"
     mkfs.ext4 -F -L boot "$boot_partition"
     boot_filesystem_uuid=$(blkid -s UUID -o value "$boot_partition")
     [[ -n $boot_filesystem_uuid ]] || die "could not determine /boot filesystem UUID"
@@ -806,6 +808,36 @@ configure_state_subvolumes() {
     if [[ $separate_opt == true ]]; then
         move_state_to_subvolume opt "$persistent_var/opt"
     fi
+}
+
+configure_composefs_boot_mounts() {
+    local config_root=$1
+    local unit_source_dir=$2
+    local unit_dir=$config_root/etc/systemd/system
+    local requires_dir=$unit_dir/local-fs.target.requires
+    local unit
+
+    [[ -n ${boot_filesystem_uuid:-} ]] || die "boot filesystem UUID is unavailable"
+    [[ -n ${efi_filesystem_uuid:-} ]] || die "EFI filesystem UUID is unavailable"
+    [[ -r $unit_source_dir/sysroot-boot.mount.in ]] ||
+        die "composefs boot mount unit template is missing: $unit_source_dir/sysroot-boot.mount.in"
+    [[ -r $unit_source_dir/boot.mount ]] ||
+        die "composefs boot bind mount unit is missing: $unit_source_dir/boot.mount"
+    [[ -r $unit_source_dir/boot-efi.mount.in ]] ||
+        die "composefs EFI mount unit template is missing: $unit_source_dir/boot-efi.mount.in"
+
+    log "Configuring composefs boot filesystem mounts"
+    install -d -m 0755 "$unit_dir" "$requires_dir"
+    sed "s|@BOOT_FILESYSTEM_UUID@|$boot_filesystem_uuid|g" \
+        "$unit_source_dir/sysroot-boot.mount.in" >"$unit_dir/sysroot-boot.mount"
+    install -m 0644 "$unit_source_dir/boot.mount" "$unit_dir/boot.mount"
+    sed "s|@EFI_FILESYSTEM_UUID@|$efi_filesystem_uuid|g" \
+        "$unit_source_dir/boot-efi.mount.in" >"$unit_dir/boot-efi.mount"
+    chmod 0644 "$unit_dir/sysroot-boot.mount" "$unit_dir/boot-efi.mount"
+
+    for unit in sysroot-boot.mount boot.mount boot-efi.mount; do
+        ln -sfn "../$unit" "$requires_dir/$unit"
+    done
 }
 
 state_path_for_mount() {

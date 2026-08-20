@@ -1,0 +1,13 @@
+[Unit]
+Description=EFI System Partition
+Requires=boot.mount
+After=boot.mount
+
+[Mount]
+What=/dev/disk/by-uuid/@EFI_FILESYSTEM_UUID@
+Where=/boot/efi
+Type=vfat
+Options=rw,fmask=0177,dmask=0077
+
+[Install]
+RequiredBy=local-fs.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Read-only boot filesystem view
+Requires=sysroot-boot.mount
+After=sysroot-boot.mount
+Before=boot-efi.mount
+
+[Mount]
+What=/sysroot/boot
+Where=/boot
+Type=none
+Options=bind,ro
+
+[Install]
+RequiredBy=local-fs.target

@@ -44,10 +44,14 @@ target image must already grant sudo access to `wheel`.
 Partition and filesystem labels are intentionally lower case:
 
 ```text
-GPT name boot_efi -> VFAT label boot_efi -> /boot/efi
-GPT name boot     -> ext4 label boot      -> /boot
+GPT name boot_efi -> VFAT label boot_efi -> /boot/efi (rw)
+GPT name boot     -> ext4 label boot      -> boot filesystem
 GPT name root     -> [LUKS label root_luks] -> Btrfs label root
 ```
+
+For composefs installations, the boot filesystem is mounted at `/sysroot/boot` read-write and is
+exposed at `/boot` through a read-only bind mount. The OSTree installer retains bootc's standard
+runtime boot mount arrangement.
 
 The root filesystem always contains a `root` subvolume. Optional state subvolumes are created at
 their final backend-specific paths, with lower-case basename labels `var`, `home`, and `opt`. In the
@@ -83,10 +87,17 @@ tree for them before first boot. `/etc`, `/boot`, immutable `/usr` paths, backen
 API filesystems are rejected.
 
 The scripts use bootc's actual `--boot-mount-spec` option. There is no
-`--bootc-mount-spec` option in the checked-out bootc CLI. Root and boot use `/dev/disk/by-label/...`;
-optional mounts use `systemd.mount-extra=` or `rd.systemd.mount-extra=` kernel arguments. systemd
-documents that mount-extra fields have the form `WHAT:WHERE:FSTYPE:OPTIONS`, and that initrd mount
-targets are rooted below `/sysroot`.
+`--bootc-mount-spec` option in the checked-out bootc CLI. The composefs installer also installs
+native systemd mount units that mount the ext4 boot filesystem by UUID at `/sysroot/boot` read-write,
+expose it at `/boot` through a read-only bind mount, and mount the ESP by UUID at `/boot/efi`
+read-write. The native `boot.mount` overrides the `/boot` unit generated from bootc's
+`systemd.mount-extra=` kernel argument. The ESP is intentionally not also mounted at
+`/sysroot/boot/efi`; bootc discovers it independently when servicing composefs updates.
+
+Root and bootc state mounts otherwise use `/dev/disk/by-label/...`; optional mounts use
+`systemd.mount-extra=` or `rd.systemd.mount-extra=` kernel arguments. systemd documents that
+mount-extra fields have the form `WHAT:WHERE:FSTYPE:OPTIONS`, and that initrd mount targets are
+rooted below `/sysroot`.
 
 For LUKS, the scripts add `rd.luks.uuid=`, `rd.luks.name=`, and
 `rd.luks.options=...=x-initrd.attach`, while bootc gets the decrypted Btrfs filesystem through

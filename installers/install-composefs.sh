@@ -40,6 +40,7 @@ mapfile -t composefs_states < <(find "$install_root/state/deploy" -mindepth 1 -m
 config_root=${composefs_states[0]}
 [[ -d $config_root/etc ]] || die "composefs deployment configuration root is missing: $config_root"
 
+configure_composefs_boot_mounts "$config_root" "$script_dir/systemd"
 configure_extra_mounts "$persistent_var"
 configure_first_user "$config_root" "$persistent_var"
 relabel_target_paths "$config_root"

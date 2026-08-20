@@ -1,0 +1,13 @@
+[Unit]
+Description=Writable boot filesystem for bootc
+RequiresMountsFor=/sysroot
+Before=boot.mount
+
+[Mount]
+What=/dev/disk/by-uuid/@BOOT_FILESYSTEM_UUID@
+Where=/sysroot/boot
+Type=ext4
+Options=rw
+
+[Install]
+RequiredBy=local-fs.target
