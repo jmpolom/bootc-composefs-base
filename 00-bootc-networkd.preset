@@ -1,0 +1,3 @@
+# Apply before Fedora's general preset policy.
+enable systemd-networkd.service
+enable systemd-resolved.service

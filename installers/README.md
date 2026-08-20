@@ -147,6 +147,12 @@ container. This is required because bootc mirrors `/var/tmp` from the host mount
 install preparation; creating the directory or mounting scratch only inside the container is not
 sufficient.
 
+The example image enables `systemd-networkd` and `systemd-resolved` through
+`00-bootc-networkd.preset`, which is copied into the image before those packages are installed so
+their RPM preset processing applies the policy. `20-bootc-wired.network` requests DHCP on Ethernet
+interfaces; QEMU's user-mode network then provides outbound NAT, DHCP, and DNS without an imperative
+`systemctl enable` build step.
+
 ```bash
 ./test-with-qemu.sh -i ghcr.io/example/os:tag
 ./test-with-qemu.sh -r boot

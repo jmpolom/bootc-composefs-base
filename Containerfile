@@ -4,6 +4,8 @@ FROM quay.io/fedora/fedora:${RELEASE}
 COPY bootc-base-dirs.conf /usr/lib/tmpfiles.d/bootc-base-dirs.conf
 COPY prepare-root.conf /usr/lib/ostree/prepare-root.conf
 COPY 30-custom-bootc-composefs-build.conf /usr/lib/dracut/dracut.conf.d/30-custom-bootc-composefs-build.conf
+COPY 00-bootc-networkd.preset /usr/lib/systemd/system-preset/00-bootc-networkd.preset
+COPY 20-bootc-wired.network /usr/lib/systemd/network/20-bootc-wired.network
 
 RUN dnf install -y --setopt=install_weak_deps=false \
     audit \
@@ -21,6 +23,7 @@ RUN dnf install -y --setopt=install_weak_deps=false \
     fedora-repos-archive \
     gdisk \
     grub2-efi \
+    iproute \
     kernel \
     nss-altfiles \
     ostree \
@@ -29,6 +32,7 @@ RUN dnf install -y --setopt=install_weak_deps=false \
     shim \
     systemd \
     systemd-boot-unsigned \
+    systemd-networkd \
     systemd-pam \
     systemd-resolved \
     tpm2-tools \
