@@ -516,6 +516,30 @@ create_live_wrapper() {
 set -Eeuo pipefail
 umask 077
 scratch_mounted=false
+runtime_shared=false
+
+require_full_capabilities() {
+    [[ $EUID -eq 0 ]] || {
+        echo "The QEMU installation service must run as UID 0" >&2
+        return 1
+    }
+
+    local last_cap expected_hex cap_eff cap_bnd
+    read -r last_cap </proc/sys/kernel/cap_last_cap
+    ((last_cap < 63)) || {
+        echo "Cannot verify a capability set wider than 63 bits" >&2
+        return 1
+    }
+    printf -v expected_hex '%016x' "$(((1 << (last_cap + 1)) - 1))"
+    cap_eff=$(awk '$1 == "CapEff:" { print tolower($2) }' /proc/self/status)
+    cap_bnd=$(awk '$1 == "CapBnd:" { print tolower($2) }' /proc/self/status)
+    [[ $cap_eff == "$expected_hex" && $cap_bnd == "$expected_hex" ]] || {
+        echo "The QEMU installation service does not have every available capability" >&2
+        echo "expected=$expected_hex CapEff=$cap_eff CapBnd=$cap_bnd" >&2
+        return 1
+    }
+    echo "Installation service privilege check passed: uid=$EUID CapEff=$cap_eff CapBnd=$cap_bnd"
+}
 
 finish() {
     local status=$?
@@ -544,6 +568,13 @@ finish() {
             status=1
         fi
     fi
+    if [[ $runtime_shared == true ]]; then
+        mount --make-private "$runtime_dir"
+        if ! umount "$runtime_dir"; then
+            echo "Could not unmount shared installer runtime directory $runtime_dir" >&2
+            status=1
+        fi
+    fi
     printf 'TEST_INSTALL_QEMU_BOOTC_RESULT=%d\n' "$status"
     sync
     systemctl --no-block poweroff
@@ -554,6 +585,7 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+require_full_capabilities
 udevadm settle --timeout=30
 [[ -b $scratch_device ]] || {
     echo "Temporary-storage disk did not appear: $scratch_device" >&2
@@ -571,16 +603,22 @@ df -h /var/tmp
 echo "Pulling $image_ref"
 podman pull "$image_ref"
 mkdir -p "$runtime_dir"
+mount --bind "$runtime_dir" "$runtime_dir"
+mount --make-rshared "$runtime_dir"
+runtime_shared=true
+findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION --mountpoint "$runtime_dir"
 podman run --rm --pull=never --privileged \
+    --user 0:0 \
+    --userns host \
+    --cap-add all \
     --pid=host \
     --ipc=host \
     --security-opt label=type:unconfined_t \
-    --volume /dev:/dev \
-    --volume /run/udev:/run/udev:ro \
-    --volume /var/lib/containers:/var/lib/containers \
-    --volume /var/tmp:/var/tmp \
-    --volume "$persistent_dir:$persistent_dir:ro" \
-    --volume "$runtime_dir:$runtime_dir" \
+    --mount type=bind,source=/dev,destination=/dev \
+    --mount type=bind,source=/run/udev,destination=/run/udev,readonly=true \
+    --mount type=bind,source=/var/lib/containers,destination=/var/lib/containers \
+    --mount "type=bind,source=$persistent_dir,destination=$persistent_dir,readonly=true" \
+    --mount "type=bind,source=$runtime_dir,destination=$runtime_dir,bind-propagation=rshared" \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
     "$image_ref" \
     -c "$install_config" -y -t
@@ -638,7 +676,7 @@ EOF
       {
         "name": "test-install-qemu-bootc.service",
         "enabled": true,
-        "contents": "[Unit]\nDescription=Install the requested bootc image in the QEMU test VM\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=$GUEST_WRAPPER\nStandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n"
+        "contents": "[Unit]\nDescription=Install the requested bootc image in the QEMU test VM\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nCapabilityBoundingSet=~\nNoNewPrivileges=false\nPrivateUsers=false\nPrivateMounts=false\nProtectSystem=false\nProtectHome=false\nExecStart=$GUEST_WRAPPER\nStandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n"
       }
     ]
   }

@@ -122,6 +122,19 @@ require_commands() {
     done
 }
 
+require_full_capabilities() {
+    local last_cap expected_hex cap_eff cap_bnd
+
+    read -r last_cap </proc/sys/kernel/cap_last_cap
+    ((last_cap < 63)) || die "cannot verify a capability set wider than 63 bits"
+    printf -v expected_hex '%016x' "$(((1 << (last_cap + 1)) - 1))"
+    cap_eff=$(awk '$1 == "CapEff:" { print tolower($2) }' /proc/self/status)
+    cap_bnd=$(awk '$1 == "CapBnd:" { print tolower($2) }' /proc/self/status)
+    [[ $cap_eff == "$expected_hex" && $cap_bnd == "$expected_hex" ]] ||
+        die "installer requires all capabilities (expected=$expected_hex CapEff=$cap_eff CapBnd=$cap_bnd)"
+    log "Installer privilege check passed: uid=$EUID CapEff=$cap_eff CapBnd=$cap_bnd"
+}
+
 require_bootc_options() {
     local help_text option
     help_text=$(bootc install to-filesystem --help)
@@ -299,6 +312,7 @@ validate_extra_mount_config() {
 validate_common_config() {
     [[ $destructive_confirmed == true ]] || die "-y is required to authorize erasing the configured disks"
     [[ $EUID -eq 0 ]] || die "this installer must run as root"
+    require_full_capabilities
     [[ -n ${target_disk:-} ]] || die "target_disk is required"
     [[ $target_disk == /dev/disk/by-* ]] || die "target_disk must use a /dev/disk/by-* path"
     [[ $stateroot =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "stateroot must be lower case and path-safe"

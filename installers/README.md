@@ -129,6 +129,12 @@ is mounted at `/var/tmp` in the live VM before Podman starts so bootc's mirrored
 storage has adequate capacity. Run the harness a second time with `-r boot` to start the installed
 VM, or use `-r all` to chain both stages. All generated state defaults to `qemu-test/`.
 
+The live installer service and its Podman container both require UID 0 and the complete capability
+set; the test aborts before modifying disks if either layer is restricted. The installer runtime
+directory is a shared host mount passed with Podman's structured `--mount` syntax and `rshared`
+propagation. Consequently, the nested target, `/boot`, and EFI mounts remain visible when bootc
+changes or re-executes its mount namespace.
+
 ```bash
 ./test-with-qemu.sh -i ghcr.io/example/os:tag
 ./test-with-qemu.sh -r boot
