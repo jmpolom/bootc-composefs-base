@@ -86,9 +86,10 @@ such as `/data`, are supported but begin empty because neither backend provides 
 tree for them before first boot. `/etc`, `/boot`, immutable `/usr` paths, backend storage paths, and
 API filesystems are rejected.
 
-An extra filesystem targeting `/var` is mounted during the initramfs at the backend's physical
-state path (`/state/os/default/var` for native composefs or the stateroot's
-`/ostree/deploy/.../var` for OSTree). The backend then exposes that filesystem through its normal
+An extra filesystem targeting `/var` is mounted during the initramfs below `/sysroot` at the
+backend's physical state path (`/sysroot/state/os/default/var` for native composefs or the
+stateroot's `/sysroot/ostree/deploy/.../var` for OSTree). The generated mount is explicitly ordered
+before the backend's root-setup service. The backend then exposes that filesystem through its normal
 `/var` bind mount. Mounting the extra filesystem directly at `/var` during the real-root phase does
 not work: composefs and OSTree have already mounted deployment state there, so systemd adopts the
 existing mount without replacing its source.
@@ -102,9 +103,10 @@ read-write. The native `boot.mount` overrides the `/boot` unit generated from bo
 `/sysroot/boot/efi`; bootc discovers it independently when servicing composefs updates.
 
 Root and bootc state mounts otherwise use `/dev/disk/by-label/...`; optional mounts use
-`systemd.mount-extra=` or `rd.systemd.mount-extra=` kernel arguments. systemd documents that
-mount-extra fields have the form `WHAT:WHERE:FSTYPE:OPTIONS`, and that initrd mount targets are
-rooted below `/sysroot`.
+`systemd.mount-extra=` or `rd.systemd.mount-extra=` kernel arguments. Mount-extra fields have the
+form `WHAT:WHERE:FSTYPE:OPTIONS`. Ordinary `systemd.mount-extra=` entries are prefixed with
+`/sysroot` when processed by the initrd; `rd.systemd.mount-extra=` entries are initrd-only and use
+their target path literally, so their installed-system targets explicitly begin with `/sysroot`.
 
 For LUKS, the scripts add `rd.luks.uuid=`, `rd.luks.name=`, and
 `rd.luks.options=...=x-initrd.attach`, while bootc gets the decrypted Btrfs filesystem through

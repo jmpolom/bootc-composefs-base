@@ -28,8 +28,9 @@ declare -a bootc_args=(
 [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
 [[ $allow_missing_verity == true ]] && bootc_args+=(--allow-missing-verity)
 physical_var_path=/state/os/default/var
-append_common_kargs "$physical_var_path"
-append_state_kargs "$physical_var_path"
+root_setup_unit=bootc-root-setup.service
+append_common_kargs "$physical_var_path" "$root_setup_unit"
+append_state_kargs "$physical_var_path" "$root_setup_unit"
 run_bootc_install
 
 persistent_var="$install_root$physical_var_path"

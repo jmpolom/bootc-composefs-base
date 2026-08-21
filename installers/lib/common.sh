@@ -698,6 +698,7 @@ prepare_storage() {
 # shellcheck disable=SC2154
 append_common_kargs() {
     local physical_var_path=$1
+    local root_setup_unit=$2
 
     bootc_args+=(
         "--root-mount-spec=/dev/disk/by-label/root"
@@ -736,7 +737,13 @@ append_common_kargs() {
             # replacing the state mount. Mount the external filesystem at the
             # backend's physical state path in the initrd instead; the backend
             # will then expose it through its normal /var bind mount.
-            bootc_args+=("--karg=rd.systemd.mount-extra=/dev/disk/by-label/${label}:${physical_var_path}:${filesystem}:${options}")
+            #
+            # rd.systemd.mount-extra targets are interpreted in the initrd's
+            # own namespace. Unlike systemd.mount-extra, systemd does not
+            # automatically prefix them with /sysroot. Name the complete
+            # initrd path and order the mount before the backend assembles the
+            # deployment root.
+            bootc_args+=("--karg=rd.systemd.mount-extra=/dev/disk/by-label/${label}:/sysroot${physical_var_path}:${filesystem}:${options},x-systemd.before=${root_setup_unit}")
         else
             bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${runtime_path}:${filesystem}:${options}")
         fi
@@ -759,12 +766,13 @@ append_common_kargs() {
 
 append_state_kargs() {
     local physical_var_path=$1
+    local root_setup_unit=$2
     local source=/dev/disk/by-label/root
     local options=$state_mount_options
     local var_subvolume="root$physical_var_path"
 
     if [[ $separate_var == true ]]; then
-        bootc_args+=("--karg=rd.systemd.mount-extra=${source}:${physical_var_path}:btrfs:subvol=${var_subvolume},${options}")
+        bootc_args+=("--karg=rd.systemd.mount-extra=${source}:/sysroot${physical_var_path}:btrfs:subvol=${var_subvolume},${options},x-systemd.before=${root_setup_unit}")
     fi
     if [[ $separate_home == true ]]; then
         bootc_args+=("--karg=systemd.mount-extra=${source}:/var/home:btrfs:subvol=${var_subvolume}/home,${options}")

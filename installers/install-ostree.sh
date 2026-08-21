@@ -24,8 +24,9 @@ declare -a bootc_args=(
 [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")
 [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
 physical_var_path="/ostree/deploy/$stateroot/var"
-append_common_kargs "$physical_var_path"
-append_state_kargs "$physical_var_path"
+root_setup_unit=ostree-prepare-root.service
+append_common_kargs "$physical_var_path" "$root_setup_unit"
+append_state_kargs "$physical_var_path" "$root_setup_unit"
 run_bootc_install
 
 persistent_var="$install_root$physical_var_path"
