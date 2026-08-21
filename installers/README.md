@@ -86,6 +86,13 @@ such as `/data`, are supported but begin empty because neither backend provides 
 tree for them before first boot. `/etc`, `/boot`, immutable `/usr` paths, backend storage paths, and
 API filesystems are rejected.
 
+An extra filesystem targeting `/var` is mounted during the initramfs at the backend's physical
+state path (`/state/os/default/var` for native composefs or the stateroot's
+`/ostree/deploy/.../var` for OSTree). The backend then exposes that filesystem through its normal
+`/var` bind mount. Mounting the extra filesystem directly at `/var` during the real-root phase does
+not work: composefs and OSTree have already mounted deployment state there, so systemd adopts the
+existing mount without replacing its source.
+
 The scripts use bootc's actual `--boot-mount-spec` option. There is no
 `--bootc-mount-spec` option in the checked-out bootc CLI. The composefs installer also installs
 native systemd mount units that mount the ext4 boot filesystem by UUID at `/sysroot/boot` read-write,

@@ -27,11 +27,12 @@ declare -a bootc_args=(
 [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")
 [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
 [[ $allow_missing_verity == true ]] && bootc_args+=(--allow-missing-verity)
-append_common_kargs
-append_state_kargs /state/os/default/var
+physical_var_path=/state/os/default/var
+append_common_kargs "$physical_var_path"
+append_state_kargs "$physical_var_path"
 run_bootc_install
 
-persistent_var="$install_root/state/os/default/var"
+persistent_var="$install_root$physical_var_path"
 configure_state_subvolumes "$persistent_var"
 
 mapfile -t composefs_states < <(find "$install_root/state/deploy" -mindepth 1 -maxdepth 1 -type d -print)

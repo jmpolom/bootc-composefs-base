@@ -697,6 +697,8 @@ prepare_storage() {
 # extra_kargs and extra_mount_* are initialized dynamically by ensure_indexed_array.
 # shellcheck disable=SC2154
 append_common_kargs() {
+    local physical_var_path=$1
+
     bootc_args+=(
         "--root-mount-spec=/dev/disk/by-label/root"
         "--boot-mount-spec=UUID=$boot_filesystem_uuid"
@@ -727,7 +729,17 @@ append_common_kargs() {
         filesystem=${extra_mount_filesystems[$index]}
         options=${extra_mount_options[$index]:-defaults}
         runtime_path=${extra_mount_runtime_paths[$index]}
-        bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${runtime_path}:${filesystem}:${options}")
+        if [[ $runtime_path == /var ]]; then
+            # composefs and OSTree both mount their deployment state at /var
+            # before the real-root systemd instance processes mount-extra. A
+            # normal /var mount is therefore adopted as already active without
+            # replacing the state mount. Mount the external filesystem at the
+            # backend's physical state path in the initrd instead; the backend
+            # will then expose it through its normal /var bind mount.
+            bootc_args+=("--karg=rd.systemd.mount-extra=/dev/disk/by-label/${label}:${physical_var_path}:${filesystem}:${options}")
+        else
+            bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${runtime_path}:${filesystem}:${options}")
+        fi
 
         uuid=${extra_mount_luks_uuids[$index]:-}
         if [[ -n $uuid ]]; then
