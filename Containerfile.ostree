@@ -1,0 +1,46 @@
+ARG RELEASE=43
+ARG REPOS_IMAGE=quay.io/fedora/fedora:$RELEASE
+ARG BUILDER_IMAGE=quay.io/fedora/fedora:$RELEASE
+
+FROM $REPOS_IMAGE as repos
+
+FROM $BUILDER_IMAGE as builder
+
+RUN dnf -y install rpm-ostree selinux-policy-targeted python3
+COPY . /build
+# Avoid umask/permission leakage from the outer environment; ref e.g.
+# - https://github.com/coreos/coreos-assembler/pull/4277
+# - https://gitlab.com/fedora/bootc/base-images/-/merge_requests/254
+# This invocation preserves only the executable bit, and specifically we want to remove:
+# - setuid/setgid
+# - world writability
+# NOTE: This adds world-readability, which is what we intend here as all the content
+# is public; there's no secrets in our container build.
+RUN chmod -R a=rX,u+w /build
+WORKDIR /build
+RUN --mount=type=cache,rw,id=bootc-base-image-cache,target=/cache \
+    --mount=type=bind,rw,from=repos,src=/,dst=/repos <<EORUN
+set -xeuo pipefail
+echo "-- repo list --"
+ls /repos/etc/dnf
+echo "-- pwd list --"
+ls ./
+rpm-ostree compose rootfs --cachedir=/cache --source-root-rw=/repos ostree/manifest.yaml /target-rootfs
+bootc container lint --rootfs=/target-rootfs --no-truncate
+EORUN
+
+# This pulls in the rootfs generated in the previous step
+FROM scratch
+COPY --from=builder /target-rootfs/ /
+COPY installers/ /usr/libexec/bootc-installer/ 
+
+LABEL containers.bootc 1
+# This is an ad-hoc way for us to reference bootc-image-builder in
+# a way that in theory client tooling can inspect and find. Today
+# it isn't widely used.
+LABEL bootc.diskimage-builder quay.io/centos-bootc/bootc-image-builder
+# https://pagure.io/fedora-kiwi-descriptions/pull-request/52
+ENV container=oci
+# Make systemd the default
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

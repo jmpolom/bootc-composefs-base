@@ -1,0 +1,10 @@
+add-files:
+  - ["00-bootc-networkd.preset", "/usr/lib/systemd/system-preset/00-bootc-networkd.preset"]
+  - ["20-bootc-wired.network", "/usr/lib/systemd/network/20-bootc-wired.network"]
+
+include:
+  - manifests/manifest.yaml
+
+packages:
+  - systemd-networkd
+  - systemd-resolved
