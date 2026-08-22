@@ -6,5 +6,16 @@ include:
   - manifests/manifest.yaml
 
 packages:
+  - btrfs-progs
+  - cryptsetup
+  - findutils
+  - gawk
+  - gdisk
+  - glibc-common
+  - grep
+  - sed
+  - shadow-utils
   - systemd-networkd
   - systemd-resolved
+  - systemd-udev
+  - util-linux
