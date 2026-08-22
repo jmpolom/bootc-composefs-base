@@ -6,6 +6,7 @@ include:
   - manifests/manifest.yaml
 
 packages:
+  - audit
   - btrfs-progs
   - cryptsetup
   - dbus-broker
@@ -14,8 +15,12 @@ packages:
   - gdisk
   - glibc-common
   - grep
+  - iproute
+  - iputils
+  - policycoreutils
   - sed
   - shadow-utils
+  - systemd-boot-unsigned
   - systemd-networkd
   - systemd-resolved
   - systemd-udev
