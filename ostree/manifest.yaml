@@ -8,6 +8,7 @@ include:
 packages:
   - btrfs-progs
   - cryptsetup
+  - dbus-broker
   - findutils
   - gawk
   - gdisk
