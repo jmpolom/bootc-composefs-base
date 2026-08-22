@@ -26,6 +26,9 @@ jobs:
         target_arch:
           - "x86_64"
           - "aarch64"
+        backend:
+          - "composefs"
+          - "ostree"
     steps:
       - uses: actions/checkout@v4
       - name: Login to registry
@@ -40,8 +43,9 @@ jobs:
               | cut -c1-100)
           ./build.sh \
               -a "${{ matrix.target_arch }}" \
+              -b "${{ matrix.backend }}" \
               -d ghcr.io \
               -r "${{ matrix.release_version }}" \
               -n "${GITHUB_REPOSITORY,,}" \
-              -s "${branch_tag}-${{ matrix.target_arch }}" \
-              -s "${{ github.sha }}-${{ matrix.target_arch }}"
+              -s "${branch_tag}-${{ matrix.backend }}-${{ matrix.target_arch }}" \
+              -s "${{ github.sha }}-${{ matrix.backend }}-${{ matrix.target_arch }}"
