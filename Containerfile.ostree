@@ -30,17 +30,29 @@ bootc container lint --rootfs=/target-rootfs --no-truncate
 EORUN
 
 # This pulls in the rootfs generated in the previous step
-FROM scratch
+FROM scratch as ostree-image
 COPY --from=builder /target-rootfs/ /
-COPY installers/ /usr/libexec/bootc-installer/ 
 
 LABEL containers.bootc 1
 # This is an ad-hoc way for us to reference bootc-image-builder in
 # a way that in theory client tooling can inspect and find. Today
 # it isn't widely used.
 LABEL bootc.diskimage-builder quay.io/centos-bootc/bootc-image-builder
+LABEL ostree.bootable=1
 # https://pagure.io/fedora-kiwi-descriptions/pull-request/52
 ENV container=oci
 # Make systemd the default
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
+
+FROM ostree-image
+
+RUN useradd -U -c 'delete me' \
+            -G wheel \
+            -d /var/home/default \
+            -p '$y$j9T$kq/3XQD3zBDpUAOaxEZMj0$dbUPks0Mk8u0vh/XnAoFgPkffy7kx.Fb9ETyRJo6FP2' \
+            default
+
+COPY installers/ /usr/libexec/bootc-installer/
+
+RUN bootc container lint

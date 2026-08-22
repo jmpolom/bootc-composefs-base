@@ -583,39 +583,21 @@ trap 'exit 143' TERM
 
 require_full_capabilities
 udevadm settle --timeout=30
-for nvme_controller in /dev/nvme0 /dev/nvme1; do
-    [[ -c $nvme_controller ]] || {
-        echo "Expected NVMe controller did not appear: $nvme_controller" >&2
-        ls -l /dev/nvme* >&2 || true
-        exit 1
-    }
-done
-[[ $(sed 's/[[:space:]]*$//' /sys/class/nvme/nvme0/serial) == bootc-root ]] || {
-    echo "nvme0 is not the target-disk controller" >&2
-    exit 1
-}
-[[ $(sed 's/[[:space:]]*$//' /sys/class/nvme/nvme1/serial) == bootc-extra ]] || {
-    echo "nvme1 is not the extra-disk controller" >&2
-    exit 1
-}
-for nvme_device in /dev/nvme0n1 /dev/nvme1n1; do
+for nvme_device in "$target_device" "$extra_device"; do
     [[ -b $nvme_device ]] || {
-        echo "Expected NVMe storage device did not appear: $nvme_device" >&2
+        echo "Expected NVMe by-id link did not appear: $nvme_device" >&2
         lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL >&2
+        ls -l /dev/disk/by-id >&2 || true
         exit 1
     }
 done
-[[ -b $target_device && $(readlink -f -- "$target_device") == /dev/nvme0n1 ]] || {
-    echo "Target NVMe by-id link is missing or resolves incorrectly: $target_device" >&2
-    ls -l /dev/disk/by-id >&2 || true
+target_nvme_device=$(readlink -f -- "$target_device")
+extra_nvme_device=$(readlink -f -- "$extra_device")
+[[ $target_nvme_device != "$extra_nvme_device" ]] || {
+    echo "Target and extra NVMe links resolve to the same device" >&2
     exit 1
 }
-[[ -b $extra_device && $(readlink -f -- "$extra_device") == /dev/nvme1n1 ]] || {
-    echo "Extra NVMe by-id link is missing or resolves incorrectly: $extra_device" >&2
-    ls -l /dev/disk/by-id >&2 || true
-    exit 1
-}
-lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL /dev/nvme0n1 /dev/nvme1n1
+lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL "$target_nvme_device" "$extra_nvme_device"
 [[ -b $scratch_device ]] || {
     echo "Temporary-storage disk did not appear: $scratch_device" >&2
     exit 1
