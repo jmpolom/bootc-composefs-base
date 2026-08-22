@@ -8,6 +8,7 @@ include:
 packages:
   - audit
   - btrfs-progs
+  - bzip2
   - cryptsetup
   - dbus-broker
   - findutils
@@ -17,11 +18,17 @@ packages:
   - grep
   - iproute
   - iputils
+  - libfsverity
   - policycoreutils
   - sed
   - shadow-utils
+  - sudo
   - systemd-boot-unsigned
   - systemd-networkd
   - systemd-resolved
   - systemd-udev
+  - tar
+  - tzdata
   - util-linux
+  - vim-data
+  - vim-minimal
