@@ -804,22 +804,56 @@ run_bootc_install() {
     return "$status"
 }
 
+label_new_state_path() {
+    local state_path=$1
+    local runtime_path=$2
+    local parent_path=$3
+    local context
+
+    if command -v matchpathcon >/dev/null 2>&1 && command -v chcon >/dev/null 2>&1; then
+        if context=$(matchpathcon -n "$runtime_path"); then
+            if chcon "$context" "$state_path"; then
+                return
+            fi
+            log "SELinux context application was unavailable for $state_path"
+        else
+            log "SELinux policy lookup was unavailable for $runtime_path"
+        fi
+    fi
+
+    if command -v chcon >/dev/null 2>&1; then
+        chcon --reference="$parent_path" "$state_path" ||
+            log "SELinux context copy was unavailable for $state_path"
+    fi
+}
+
 move_state_to_subvolume() {
     local name=$1
     local state_path=$2
+    local runtime_path=$3
     local old_path="${state_path}.bootc-installer-old"
+    local parent_path
 
     log "Moving $state_path into Btrfs subvolume $name"
+    if [[ ! -e $state_path && ! -L $state_path ]]; then
+        parent_path=$(dirname -- "$state_path")
+        [[ -d $parent_path && ! -L $parent_path ]] ||
+            die "state-subvolume parent is not a directory: $parent_path"
+        log "Creating empty Btrfs subvolume $name at $state_path"
+        btrfs subvolume create "$state_path"
+        chown root:root "$state_path"
+        chmod 0755 "$state_path"
+        label_new_state_path "$state_path" "$runtime_path" "$parent_path"
+        return
+    fi
+
     [[ -d $state_path && ! -L $state_path ]] || die "state path is not a directory: $state_path"
     [[ ! -e $old_path ]] || die "temporary migration path already exists: $old_path"
     mv "$state_path" "$old_path"
     btrfs subvolume create "$state_path"
-    chmod --reference="$old_path" "$state_path"
-    chown --reference="$old_path" "$state_path"
-    touch --reference="$old_path" "$state_path"
-    if command -v chcon >/dev/null 2>&1; then
-        chcon --reference="$old_path" "$state_path" || log "SELinux context copy was unavailable for $state_path"
-    fi
+    chown root:root "$state_path"
+    chmod 0755 "$state_path"
+    label_new_state_path "$state_path" "$runtime_path" "$old_path"
     cp -a --reflink=auto "$old_path/." "$state_path/"
     rm -rf -- "$old_path"
 }
@@ -829,13 +863,13 @@ configure_state_subvolumes() {
 
     [[ -d $persistent_var ]] || die "bootc did not create persistent var at $persistent_var"
     if [[ $separate_var == true ]]; then
-        move_state_to_subvolume var "$persistent_var"
+        move_state_to_subvolume var "$persistent_var" /var
     fi
     if [[ $separate_home == true ]]; then
-        move_state_to_subvolume home "$persistent_var/home"
+        move_state_to_subvolume home "$persistent_var/home" /var/home
     fi
     if [[ $separate_opt == true ]]; then
-        move_state_to_subvolume opt "$persistent_var/opt"
+        move_state_to_subvolume opt "$persistent_var/opt" /var/opt
     fi
 }
 
@@ -892,12 +926,13 @@ configure_extra_mounts() {
     local count=${#extra_mount_devices[@]}
     ((count > 0)) || return 0
 
-    local index label filesystem options mount_point source staging state_path
+    local index label filesystem options mount_point runtime_path source staging state_path
     for ((index = 0; index < count; index++)); do
         label=${extra_mount_labels_resolved[$index]}
         filesystem=${extra_mount_filesystems[$index]}
         options=${extra_mount_options[$index]:-defaults}
         mount_point=${extra_mount_points[$index]}
+        runtime_path=$(runtime_path_for_mount "$mount_point")
         source=/dev/disk/by-label/$label
         staging=$work_root/extra-$index
 
@@ -908,12 +943,9 @@ configure_extra_mounts() {
         if state_path=$(state_path_for_mount "$persistent_var" "$mount_point"); then
             log "Moving existing state for $mount_point onto $source"
             mkdir -p "$state_path"
-            chmod --reference="$state_path" "$staging"
-            chown --reference="$state_path" "$staging"
-            touch --reference="$state_path" "$staging"
-            if command -v chcon >/dev/null 2>&1; then
-                chcon --reference="$state_path" "$staging" || log "SELinux context copy was unavailable for $mount_point"
-            fi
+            chown root:root "$staging"
+            chmod 0755 "$staging"
+            label_new_state_path "$staging" "$runtime_path" "$state_path"
             cp -a --reflink=auto "$state_path/." "$staging/"
             clear_directory "$state_path"
             umount "$staging"

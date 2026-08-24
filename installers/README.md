@@ -167,9 +167,8 @@ interfaces; QEMU's user-mode network then provides outbound NAT, DHCP, and DNS w
 ./test-with-qemu.sh -r boot
 ```
 
-Both disks are TPM2-enrolled; the extra disk defaults to `/var` and can be changed with `-p`. Existing
-VM state is never replaced unless `-f` is supplied to an install mode. See `./test-with-qemu.sh -h`
-for the complete CLI and corresponding environment variables.
+Existing VM state is never replaced unless `-f` is supplied to an install mode. See
+`./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables.
 
 ## Requirements and constraints
 
