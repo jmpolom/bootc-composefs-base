@@ -8,13 +8,12 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 QEMU_ARCH=${QEMU_ARCH:-$(uname -m)}
 RUN_MODE=${RUN_MODE:-install}
 BOOTC_IMAGE=${BOOTC_IMAGE:-}
+INSTALLER_CONFIG=${INSTALLER_CONFIG:-$SCRIPT_DIR/test-configs/qemu-default.env}
 PODMAN_IMAGE_REF=
 QEMU_WORK_DIR=${QEMU_WORK_DIR:-$SCRIPT_DIR/qemu-test}
 FCOS_STREAM=${FCOS_STREAM:-stable}
 FCOS_ISO=${FCOS_ISO:-}
 INSTALLER_BACKEND=${INSTALLER_BACKEND:-composefs}
-BOOTLOADER=${BOOTLOADER:-grub}
-EXTRA_MOUNT_POINT=${EXTRA_MOUNT_POINT:-/var}
 LUKS_PASSWORD_FILE=${LUKS_PASSWORD_FILE:-}
 RECOVERY_KEY_FILE=${RECOVERY_KEY_FILE:-}
 TARGET_DISK_SIZE=${TARGET_DISK_SIZE:-40G}
@@ -31,7 +30,6 @@ FIRMWARE_VARS_TEMPLATE=${FIRMWARE_VARS_TEMPLATE:-}
 BOOT_MENU_DELAY_SECS=${BOOT_MENU_DELAY_SECS:-8}
 GRUB_KERNEL_LINE_DOWNS=${GRUB_KERNEL_LINE_DOWNS:-2}
 INSTALL_TIMEOUT_SECS=${INSTALL_TIMEOUT_SECS:-7200}
-TPM_PCRS=${TPM_PCRS:-7}
 LIVE_KARGS=${LIVE_KARGS:-ignition.firstboot ignition.platform.id=qemu}
 
 QEMU_PID=
@@ -49,13 +47,13 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -i IMAGE    Docker Registry bootc image; required for      [BOOTC_IMAGE]
               install and all. An optional docker:// prefix
               is accepted.
+  -C FILE     Installer configuration to copy into the guest. [INSTALLER_CONFIG]
   -w DIR      Working directory below the project root.      [QEMU_WORK_DIR]
   -s STREAM   Fedora CoreOS stream.                          [FCOS_STREAM]
   -I ISO      Use this Fedora CoreOS live ISO.               [FCOS_ISO]
   -b BACKEND  Installer backend: composefs or ostree.        [INSTALLER_BACKEND]
-  -l LOADER   Bootloader: grub or systemd.                   [BOOTLOADER]
-  -p PATH     Mount point for the encrypted extra disk.      [EXTRA_MOUNT_POINT]
-  -P FILE     Retained LUKS password file for both disks.    [LUKS_PASSWORD_FILE]
+  -P FILE     LUKS-password payload; the config selects its guest path.
+                                                               [LUKS_PASSWORD_FILE]
   -k FILE     Host recovery-key output file.                 [RECOVERY_KEY_FILE]
   -d SIZE     Target NVMe qcow2 size.                        [TARGET_DISK_SIZE]
   -e SIZE     Extra NVMe qcow2 size.                         [EXTRA_DISK_SIZE]
@@ -72,7 +70,7 @@ first boot, or '-r all' to install and immediately start the installed system.
 Additional environment-only overrides:
   QEMU_ACCEL, QEMU_DISPLAY, FIRMWARE_CODE, FIRMWARE_VARS_TEMPLATE,
   BOOT_MENU_DELAY_SECS, GRUB_KERNEL_LINE_DOWNS, INSTALL_TIMEOUT_SECS,
-  TPM_PCRS, and LIVE_KARGS.
+  LIVE_KARGS.
 EOF
 }
 
@@ -87,17 +85,16 @@ log() {
 
 parse_options() {
     local option
-    while getopts ':a:r:i:w:s:I:b:l:p:P:k:d:e:t:m:c:fh' option; do
+    while getopts ':a:r:i:C:w:s:I:b:P:k:d:e:t:m:c:fh' option; do
         case "$option" in
             a) QEMU_ARCH=$OPTARG ;;
             r) RUN_MODE=$OPTARG ;;
             i) BOOTC_IMAGE=$OPTARG ;;
+            C) INSTALLER_CONFIG=$OPTARG ;;
             w) QEMU_WORK_DIR=$OPTARG ;;
             s) FCOS_STREAM=$OPTARG ;;
             I) FCOS_ISO=$OPTARG ;;
             b) INSTALLER_BACKEND=$OPTARG ;;
-            l) BOOTLOADER=$OPTARG ;;
-            p) EXTRA_MOUNT_POINT=$OPTARG ;;
             P) LUKS_PASSWORD_FILE=$OPTARG ;;
             k) RECOVERY_KEY_FILE=$OPTARG ;;
             d) TARGET_DISK_SIZE=$OPTARG ;;
@@ -168,11 +165,6 @@ validate_configuration() {
     case "$RUN_MODE" in install | boot | all) ;; *) die "invalid run mode: $RUN_MODE" ;; esac
     case "$FCOS_STREAM" in stable | testing | next) ;; *) die "invalid Fedora CoreOS stream: $FCOS_STREAM" ;; esac
     case "$INSTALLER_BACKEND" in composefs | ostree) ;; *) die "invalid installer backend: $INSTALLER_BACKEND" ;; esac
-    case "$BOOTLOADER" in grub | systemd) ;; *) die "invalid bootloader: $BOOTLOADER" ;; esac
-    [[ ! ($INSTALLER_BACKEND == ostree && $BOOTLOADER != grub) ]] ||
-        die "the OSTree installer only supports the GRUB bootloader"
-    [[ $EXTRA_MOUNT_POINT == /* ]] || die "extra mount point must be absolute: $EXTRA_MOUNT_POINT"
-    [[ $EXTRA_MOUNT_POINT != *$'\n'* ]] || die "extra mount point cannot contain a newline"
     [[ $QEMU_CPUS =~ ^[1-9][0-9]*$ ]] || die "guest CPU count must be a positive integer"
     [[ $BOOT_MENU_DELAY_SECS =~ ^[0-9]+$ ]] || die "BOOT_MENU_DELAY_SECS must be a non-negative integer"
     [[ $GRUB_KERNEL_LINE_DOWNS =~ ^[0-9]+$ ]] || die "GRUB_KERNEL_LINE_DOWNS must be a non-negative integer"
@@ -193,6 +185,9 @@ validate_configuration() {
         [[ -f $FCOS_ISO && -r $FCOS_ISO ]] || die "Fedora CoreOS ISO is not readable: $FCOS_ISO"
         FCOS_ISO=$(absolute_existing_path "$FCOS_ISO")
     fi
+    [[ -f $INSTALLER_CONFIG && -r $INSTALLER_CONFIG ]] ||
+        die "installer config is not a readable regular file: $INSTALLER_CONFIG"
+    INSTALLER_CONFIG=$(absolute_existing_path "$INSTALLER_CONFIG")
 }
 
 initialize_paths() {
@@ -461,45 +456,8 @@ data_url_from_file() {
     printf 'data:text/plain;charset=utf-8;base64,%s' "$(base64 <"$1" | tr -d '\n')"
 }
 
-create_installer_config() {
-    local serial_console
-    if [[ $QEMU_ARCH == aarch64 ]]; then
-        serial_console=ttyAMA0,115200n8
-    else
-        serial_console=ttyS0,115200n8
-    fi
-
-    {
-        printf 'target_disk=%q\n' "$GUEST_TARGET_DISK"
-        printf 'source_imgref=\n'
-        printf 'target_imgref=\n'
-        printf 'install_root=%q\n' "$GUEST_RUNTIME_DIR/install-root"
-        printf 'work_root=%q\n' "$GUEST_RUNTIME_DIR"
-        printf 'bootloader=%q\n' "$BOOTLOADER"
-        printf 'root_encrypted=true\n'
-        printf 'root_tpm2=true\n'
-        printf 'root_tpm2_pcrs=%q\n' "$TPM_PCRS"
-        printf 'root_tpm2_recovery=true\n'
-        printf 'recovery_key_output_file=%q\n' "$GUEST_RECOVERY_FILE"
-        if [[ -n $LUKS_PASSWORD_FILE ]]; then
-            printf 'luks_ephemeral_key=false\n'
-            printf 'luks_password_file=%q\n' "$GUEST_PASSWORD_FILE"
-        else
-            printf 'luks_ephemeral_key=true\n'
-            printf 'luks_password_file=\n'
-        fi
-        printf 'extra_mount_devices=(%q)\n' "$GUEST_EXTRA_DISK"
-        printf 'extra_mount_points=(%q)\n' "$EXTRA_MOUNT_POINT"
-        printf 'extra_mount_filesystems=(btrfs)\n'
-        printf 'extra_mount_encrypted=(true)\n'
-        printf 'extra_mount_options=(compress=zstd,noatime)\n'
-        printf 'extra_mount_tpm2=(true)\n'
-        printf 'extra_mount_tpm2_pcrs=(%q)\n' "$TPM_PCRS"
-        printf 'extra_mount_tpm2_recovery=(true)\n'
-        printf 'extra_kargs=(console=tty0 %q)\n' "console=$serial_console"
-        printf 'user_name=\n'
-    } >"$INSTALL_CONFIG"
-    chmod 0600 "$INSTALL_CONFIG"
+stage_installer_config() {
+    install -m 0600 "$INSTALLER_CONFIG" "$INSTALL_CONFIG"
 }
 
 create_live_wrapper() {
@@ -874,7 +832,7 @@ validate_recovery_output() {
 
 run_install() {
     local qemu_status
-    create_installer_config
+    stage_installer_config
     create_live_wrapper
     create_live_ignition
     start_swtpm
