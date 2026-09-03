@@ -44,6 +44,7 @@ jobs:
           ./build.sh \
               -a "${{ matrix.target_arch }}" \
               -b "${{ matrix.backend }}" \
+              -c "Containerfile.${{ matrix.backend }}" \
               -d ghcr.io \
               -r "${{ matrix.release_version }}" \
               -n "${GITHUB_REPOSITORY,,}" \
