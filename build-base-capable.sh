@@ -6,8 +6,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 arch="x86_64"
 backend="composefs"
-containerfile="Containerfile.workstation"
-name="fedora-silverblue-ws"
+containerfile=""
+name=""
 registry=""
 release="44"
 tag_suffix="main"
