@@ -5,7 +5,7 @@ set -xeuo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 arch="x86_64"
-ostree_compose=false
+backend="composefs"
 containerfile="Containerfile.workstation"
 name="fedora-silverblue-ws"
 registry=""
@@ -18,14 +18,14 @@ usage() {
     cat <<'EOF'
 Usage: build-base-capable.sh [OPTIONS] [-- PODMAN_BUILD_ARG ...]
 
-Build and optionally push a bootc image. Builds are unprivileged by default.
+Build and optionally push a bootc image.
 
 Options:
   -a ARCH          x86_64 or aarch64 (default: x86_64)
+  -b BACKEND       composefs or ostree (default: composefs)
   -c CONTAINERFILE Containerfile path (default: Containerfile.workstation)
   -d REGISTRY      Push destination, for example ghcr.io/example
   -n NAME          Image name (default: fedora-silverblue-ws)
-  -p               Enable privileged ostree base composition
   -r RELEASE       Fedora release (default: 44)
   -s TAG_SUFFIX    Tag suffix; may be repeated (default: main)
   -h               Show this help
@@ -51,14 +51,14 @@ assert_not_empty() {
 }
 
 original_args=("$@")
-while getopts ":a:c:d:hn:pr:s:" opt; do
+while getopts ":a:b:c:d:hn:r:s:" opt; do
     case ${opt} in
         a) assert_not_empty "a" "$OPTARG"; arch="$OPTARG" ;;
+        b) assert_not_empty "b" "$OPTARG"; backend="$OPTARG" ;;
         c) assert_not_empty "c" "$OPTARG"; containerfile="$OPTARG" ;;
         d) assert_not_empty "d" "$OPTARG"; registry="${OPTARG%/}" ;;
         h) usage; exit 0 ;;
         n) assert_not_empty "n" "$OPTARG"; name="$OPTARG" ;;
-        p) ostree_compose=true ;;
         r) assert_not_empty "r" "$OPTARG"; release="$OPTARG" ;;
         s) assert_not_empty "s" "$OPTARG"; tag_suffixes+=("$OPTARG") ;;
         \?) echo "Invalid option: -$OPTARG" >&2; usage >&2; exit 1 ;;
@@ -86,6 +86,20 @@ case ${arch} in
     *) die "Invalid argument for -a: unsupported architecture: ${arch}" ;;
 esac
 
+backend_opts=()
+case ${backend} in
+    composefs) ;;
+    ostree)
+        # rpm-ostree compose rootfs needs FUSE and elevated build privileges.
+        backend_opts=(
+            "--security-opt=label=disable"
+            "--cap-add=all"
+            "--device=/dev/fuse"
+        )
+        ;;
+    *) die "Invalid argument for -b: unsupported backend: ${backend}" ;;
+esac
+
 if [[ ${containerfile} != /* ]]; then
     containerfile="${script_dir}/${containerfile}"
 fi
@@ -104,21 +118,11 @@ for tagged_name in "${tagged_names[@]}"; do
     tag_opts+=("-t" "${tagged_name}")
 done
 
-ostree_compose_opts=()
-if [[ ${ostree_compose} == true ]]; then
-    # rpm-ostree compose rootfs needs FUSE and elevated build privileges.
-    ostree_compose_opts=(
-        "--security-opt=label=disable"
-        "--cap-add=all"
-        "--device=/dev/fuse"
-    )
-fi
-
 podman build \
     "${extra_podman_args[@]}" \
     --platform "linux/${platform_arch}" \
     --build-arg release="${release}" \
-    "${ostree_compose_opts[@]}" \
+    "${backend_opts[@]}" \
     "${tag_opts[@]}" \
     -f "${containerfile}" \
     "${script_dir}"
