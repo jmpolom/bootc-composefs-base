@@ -15,11 +15,12 @@ on:
 jobs:
   build:
     if: contains(fromJson('["main","test","stage","next","poc"]'), github.ref_name)
-    runs-on: ${{ matrix.target_arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.target_arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     permissions:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         release_version:
           - "44"
@@ -31,6 +32,23 @@ jobs:
           - "ostree"
     steps:
       - uses: actions/checkout@v4
+      - name: Disable AppArmor for diagnostic build
+        run: |
+          echo "AppArmor status before teardown"
+          sudo aa-status
+          echo "AppArmor kernel messages before teardown"
+          sudo journalctl -k --no-pager | grep -Ei 'apparmor|audit.*denied' || true
+          echo "Disabling AppArmor's unprivileged user namespace restrictions"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined ]]; then
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          fi
+          sudo systemctl mask --runtime apparmor.service
+          sudo aa-teardown
+          echo "AppArmor status after teardown"
+          sudo aa-status || true
+          echo "Current shell confinement"
+          cat /proc/self/attr/current
       - name: Login to registry
         env:
           REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -49,4 +67,21 @@ jobs:
               -r "${{ matrix.release_version }}" \
               -n "${GITHUB_REPOSITORY,,}" \
               -s "${branch_tag}-${{ matrix.backend }}-${{ matrix.target_arch }}" \
-              -s "${{ github.sha }}-${{ matrix.backend }}-${{ matrix.target_arch }}"
+              -s "${{ github.sha }}-${{ matrix.backend }}-${{ matrix.target_arch }}" \
+              -- --security-opt=apparmor=unconfined
+      - name: Collect security diagnostics
+        if: always()
+        run: |
+          echo "Kernel and Podman versions"
+          uname -a
+          podman version || true
+          podman info --debug || true
+          echo "Current shell confinement"
+          cat /proc/self/attr/current || true
+          echo "AppArmor status"
+          sudo aa-status || true
+          echo "AppArmor sysctls"
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          sysctl kernel.apparmor_restrict_unprivileged_unconfined || true
+          echo "AppArmor and access-denial kernel messages"
+          sudo journalctl -k --no-pager | grep -Ei 'apparmor|audit.*denied|permission denied' || true
