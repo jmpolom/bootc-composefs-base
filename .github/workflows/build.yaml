@@ -31,12 +31,12 @@ jobs:
           - "composefs"
           - "ostree"
     steps:
-      - uses: actions/checkout@v4
-      - name: Disable AppArmor for diagnostic build
+      - uses: actions/checkout@v7
+      - name: Disable AppArmor for ostree builds
         run: |
-          echo "AppArmor status before teardown"
+          echo -n "AppArmor status before teardown: "
           sudo aa-status
-          echo "AppArmor kernel messages before teardown"
+          echo "AppArmor kernel messages before teardown:"
           sudo journalctl -k --no-pager | grep -Ei 'apparmor|audit.*denied' || true
           echo "Disabling AppArmor's unprivileged user namespace restrictions"
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -45,9 +45,9 @@ jobs:
           fi
           sudo systemctl mask --runtime apparmor.service
           sudo aa-teardown
-          echo "AppArmor status after teardown"
+          echo -n "AppArmor status after teardown: "
           sudo aa-status || true
-          echo "Current shell confinement"
+          echo -n "Current shell confinement: "
           cat /proc/self/attr/current
       - name: Login to registry
         env:
@@ -72,16 +72,17 @@ jobs:
       - name: Collect security diagnostics
         if: always()
         run: |
-          echo "Kernel and Podman versions"
+          echo -n "uname: "
           uname -a
+          echo "Podman version: "
           podman version || true
           podman info --debug || true
-          echo "Current shell confinement"
+          echo -n "Current shell confinement: "
           cat /proc/self/attr/current || true
-          echo "AppArmor status"
+          echo -n "AppArmor status: "
           sudo aa-status || true
           echo "AppArmor sysctls"
           sysctl kernel.apparmor_restrict_unprivileged_userns || true
           sysctl kernel.apparmor_restrict_unprivileged_unconfined || true
-          echo "AppArmor and access-denial kernel messages"
+          echo "AppArmor and access-denial kernel messages:"
           sudo journalctl -k --no-pager | grep -Ei 'apparmor|audit.*denied|permission denied' || true
