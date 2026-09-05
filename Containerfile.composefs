@@ -1,5 +1,5 @@
-ARG RELEASE=44
-FROM quay.io/fedora/fedora:${RELEASE}
+ARG release=44
+FROM quay.io/fedora/fedora:${release}
 
 COPY composefs/bootc-base-dirs.conf /usr/lib/tmpfiles.d/bootc-base-dirs.conf
 COPY composefs/prepare-root.conf /usr/lib/ostree/prepare-root.conf

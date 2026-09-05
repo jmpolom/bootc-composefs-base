@@ -1,10 +1,10 @@
-ARG RELEASE=43
-ARG REPOS_IMAGE=quay.io/fedora/fedora:$RELEASE
-ARG BUILDER_IMAGE=quay.io/fedora/fedora:$RELEASE
+ARG release=43
+ARG repos_image=quay.io/fedora/fedora:$release
+ARG builder_image=quay.io/fedora/fedora:$release
 
-FROM $REPOS_IMAGE as repos
+FROM $repos_image as repos
 
-FROM $BUILDER_IMAGE as builder
+FROM $builder_image as builder
 
 RUN dnf -y install rpm-ostree selinux-policy-targeted python3
 COPY . /build
