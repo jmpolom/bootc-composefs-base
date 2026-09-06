@@ -1,15 +1,77 @@
 # Tailored bootc filesystem installers
 
-These scripts deliberately keep the OSTree and native composefs deployment flows separate:
+The two entrypoints deliberately keep the native composefs and OSTree deployment flows separate.
+Both installers erase one configured whole GPT disk, create an ESP, an XBOOTLDR-style `/boot`
+partition, and a Btrfs root partition. They support optional LUKS2/TPM2 enrollment, root-backed
+Btrfs state subvolumes, and additional stateful mounts. They do not generate `/etc/fstab` or
+`/etc/crypttab`.
 
-- `install-ostree.sh` installs the OSTree backend and requires GRUB.
-- `install-composefs.sh` passes `--composefs-backend` and accepts `grub` or `systemd`.
-- `lib/common.sh` contains only storage preparation and common post-install operations.
+## Configuration
 
-Both scripts erase one whole GPT disk, create an ESP, an XBOOTLDR-style `/boot` partition, and a
-Btrfs root partition. They support optional LUKS2 encryption, optional `var`, `home`, and `opt`
-Btrfs subvolumes, and additional whole disks for stateful mounts. They do not generate `/etc/fstab`
-or `/etc/crypttab`.
+Common settings in `install.env.example` come first: the target disk and image references, disk
+sizes, root encryption and enrollment, recovery output, mount options, indexed extra-mount arrays,
+the first user, kernel arguments, and working paths. The final labeled sections contain settings
+specific to composefs (`bootloader` and `allow_missing_verity`) and OSTree (`stateroot`). Do not add
+an `existing` setting: the current installer lifecycle is intentionally limited to preparing its
+new installation storage and configuring the selected deployment.
+
+Mount-option settings describe newly created storage. A colon is rejected where an option is
+serialized by `systemd.mount-extra` because that argument uses `WHAT:WHERE:FSTYPE:OPTIONS`; it is
+not a general filesystem-option allowlist. Each `extra_mount_points` value is a literal absolute
+installed-tree target. It is never rewritten below `/var`, so `/home`, `/opt`, `/srv`, and `/data`
+remain those exact targets. An existing directory is used, a missing directory and all parents are
+created, and an image symlink or other non-directory is rejected unchanged without replacement,
+unlinking, or renaming it.
+
+The three legacy switches are normalized before indexed-array validation. For a backend physical
+state path `P`, their exact generated records are:
+
+| Switch | Device | Target | Filesystem/label | Options |
+| --- | --- | --- | --- | --- |
+| `separate_var=true` | `/dev/disk/by-label/root` | `/var` | `btrfs` / `root` | `subvol=root${P},$state_mount_options` |
+| `separate_home=true` | `/dev/disk/by-label/root` | `/var/home` | `btrfs` / `root` | `subvol=root${P}/home,$state_mount_options` |
+| `separate_opt=true` | `/dev/disk/by-label/root` | `/var/opt` | `btrfs` / `root` | `subvol=root${P}/opt,$state_mount_options` |
+
+The generated records also set `extra_mount_encrypted`, `extra_mount_tpm2`, and
+`extra_mount_tpm2_recovery` to `false`, and `extra_mount_luks_names` and
+`extra_mount_tpm2_pcrs` to empty. `P` is `/state/os/default/var` for composefs and
+`/ostree/deploy/$stateroot/var` for OSTree, so for example composefs `separate_home` selects
+`subvol=root/state/os/default/var/home`, while OSTree selects
+`subvol=root/ostree/deploy/$stateroot/var/home`. Explicit records are retained and generated
+records are appended. An explicit record using the same literal target as a true switch is
+rejected; the same complete root-backed record written explicitly has identical behavior.
+
+## Architecture and lifecycle
+
+The final implementation has three shared libraries and two backend entrypoints:
+
+- `lib/common.sh` owns the CLI, common defaults, callback dispatch, orchestration, common
+  validation, generic bootc arguments, and cleanup. It sources the other two libraries.
+- `lib/storage.sh` owns shortcut normalization, storage-array and mount-option validation, and
+  preparation of disks, filesystems, Btrfs subvolumes, LUKS, and mounts.
+- `lib/state.sh` owns exact-path target preparation, state migration, extra-mount population, the
+  first-user setup, and SELinux relabeling.
+- `install-composefs.sh` owns composefs paths, options, services, assets, and post-install work;
+  `install-ostree.sh` owns OSTree paths, options, and deployment lookup.
+
+Sourcing `lib/common.sh` is sourceable and side-effect-free: it defines functions and globals but
+does not parse arguments, install traps, create directories, or start an installation. Each
+entrypoint defines the same callback contract:
+`<backend>_set_defaults`, `<backend>_preflight`, `<backend>_validate_mount_target`,
+`<backend>_build_bootc_args`, `<backend>_append_external_var_karg`,
+`<backend>_locate_deployment`, and `<backend>_postprocess`. The shared runner calls these through
+validated callback names; backend policy and assets stay in the backend entrypoint while storage,
+state, and orchestration stay shared.
+
+Preflight validates configuration, paths, commands, assets, arrays, mapper names, mount options,
+and backend requirements before recovery output is initialized or any disk is erased. Secret
+operations temporarily disable Bash xtrace and restore its prior state, so recovery keys and
+password hashes are not exposed by `-t`. Cleanup attempts every reverse-order unmount and mapper
+close plus temporary-key removal, logs individual failures, preserves an original failure status,
+and reports success only when cleanup succeeds. There are no forced/lazy unmounts, unspecified
+retries, rollback machinery, or general existing-filesystem lifecycle in scope. Additional
+whole-disk records are newly created storage; root-backed normalized records create/reuse only
+their selected Btrfs subvolumes within the newly created root filesystem.
 
 ## Usage
 
@@ -39,7 +101,18 @@ These settings are mutually exclusive. A plaintext user password remains unsuppo
 `user_password_hash` with a crypt-format hash or leave it empty to create a locked account. The
 target image must already grant sudo access to `wheel`.
 
-## Layout
+## Backend behavior and layout
+
+`install-composefs.sh` accepts `bootloader=grub` or `bootloader=systemd`, passes
+`--composefs-backend`, and protects `/composefs` and `/state` from extra mounts. Its physical
+`/var` is `/state/os/default/var`; an external extra filesystem targeting literal `/var` is mounted
+in the initramfs below `/sysroot/state/os/default/var` before `bootc-root-setup.service`.
+
+`install-ostree.sh` supports GRUB only, validates `stateroot`, passes `--stateroot`, and protects
+`/ostree` from extra mounts. Its physical `/var` is
+`/ostree/deploy/$stateroot/var`; it preserves the existing real-root `/var` strategy and uses
+`systemd.mount-extra` for an external `/var` filesystem. OSTree deployment lookup uses
+`ostree admin --sysroot=... --print-current-dir`.
 
 Partition and filesystem labels are intentionally lower case:
 
@@ -53,11 +126,11 @@ For composefs installations, the boot filesystem is mounted at `/sysroot/boot` r
 exposed at `/boot` through a read-only bind mount. The OSTree installer retains bootc's standard
 runtime boot mount arrangement.
 
-The root filesystem always contains a `root` subvolume. Optional state subvolumes are created at
-their final backend-specific paths, with lower-case basename labels `var`, `home`, and `opt`. In the
-default case bootc retains its standard `/home -> /var/home`, `/opt -> /var/opt`,
-`/root -> /var/roothome`, and `/usr/local -> /var/usrlocal` mappings. Separate `home` and `opt`
-subvolumes are mounted at `/var/home` and `/var/opt`, preserving those mappings.
+The root filesystem always contains a `root` subvolume. Root-backed normalized records select
+subvolumes at the backend-specific physical `/var` path and its `home`/`opt` descendants. A true
+`separate_var`, `separate_home`, or `separate_opt` switch is therefore equivalent to the exact
+indexed record shown above; there is no later shortcut-specific path handling. Other literal
+targets are prepared and mounted at their requested paths.
 
 ## Additional state disks
 
@@ -80,19 +153,17 @@ Labels default to a lower-case form of the logical path and are truncated only t
 limits. Runtime sources always use `/dev/disk/by-label/...`. Encrypted entries receive a LUKS2
 label, a stable mapper name, and `rd.luks.uuid=`, `rd.luks.name=`, and `rd.luks.options=` arguments.
 
-Existing image state is migrated for `/var` and its descendants and for the standard bootc aliases
-under `/home`, `/opt`, `/root`, `/usr/local`, `/srv`, `/mnt`, and `/media`. Other stateful targets,
-such as `/data`, are supported but begin empty because neither backend provides a persistent source
-tree for them before first boot. `/etc`, `/boot`, immutable `/usr` paths, backend storage paths, and
-API filesystems are rejected.
+Existing image state is migrated from each requested literal target directory. `/var` and its
+descendants are accessed below the backend's physical `/var`; every other allowed target is
+accessed below the deployment configuration root. The requested path is never resolved through
+live-image aliases. `/etc`, `/boot`, immutable `/usr` paths, backend storage paths, and API
+filesystems are rejected.
 
-An extra filesystem targeting `/var` is mounted during the initramfs below `/sysroot` at the
-backend's physical state path (`/sysroot/state/os/default/var` for native composefs or the
-stateroot's `/sysroot/ostree/deploy/.../var` for OSTree). The generated mount is explicitly ordered
-before the backend's root-setup service. The backend then exposes that filesystem through its normal
-`/var` bind mount. Mounting the extra filesystem directly at `/var` during the real-root phase does
-not work: composefs and OSTree have already mounted deployment state there, so systemd adopts the
-existing mount without replacing its source.
+For composefs, an external filesystem targeting `/var` is mounted during the initramfs below
+`/sysroot/state/os/default/var`, explicitly before `bootc-root-setup.service`; composefs then
+exposes it through its normal `/var` bind mount. OSTree preserves its existing real-root `/var`
+strategy and emits `systemd.mount-extra` for the literal `/var` target. Other literal targets use
+their requested paths in the generated mount arguments.
 
 The scripts use bootc's actual `--boot-mount-spec` option. There is no
 `--bootc-mount-spec` option in the checked-out bootc CLI. The composefs installer also installs
@@ -169,6 +240,18 @@ interfaces; QEMU's user-mode network then provides outbound NAT, DHCP, and DNS w
 
 Existing VM state is never replaced unless `-f` is supplied to an install mode. See
 `./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables.
+
+## Removing a backend
+
+Backend support is intentionally removable by ownership boundary. To remove OSTree installer
+support, delete `install-ostree.sh`, its labeled OSTree documentation and configuration section,
+and the OSTree backend-specific files/configuration. To remove composefs installer support, delete
+`install-composefs.sh`, `backends/composefs/`, and the labeled composefs documentation and
+configuration section. The shared libraries retain only backend-neutral behavior.
+
+`Containerfile.ostree` and image building are separate from installer backend support. The
+Containerfile and its image-building flow are unchanged by this installer refactor; removing an
+installer does not imply changing or removing that Containerfile or its build process.
 
 ## Requirements and constraints
 
