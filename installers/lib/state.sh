@@ -120,6 +120,57 @@ prepare_mount_target() {
         die "extra mount target could not be created as a directory: $requested_path"
 }
 
+root_backed_extra_mount_path() {
+    local index=$1
+    local subvolume
+    subvolume=$(root_backed_extra_mount_subvolume "$index") || return 1
+    printf '%s%s\n' "$install_root" "${subvolume#root}"
+}
+
+prepare_root_backed_extra_mount() {
+    local subvolume=$1
+    local subvolume_path=$2
+    local parent_path=$subvolume_path
+    local old_path
+
+    # The subvolume path is inside the already-mounted root filesystem.  Do
+    # not follow symlinks while preparing any missing parent, and do not
+    # replace a symlink or non-directory supplied by the image.
+    while [[ $parent_path != / ]]; do
+        if [[ -L $parent_path ]]; then
+            die "root-backed extra subvolume is a symlink: $subvolume"
+        fi
+        if [[ -e $parent_path ]]; then
+            [[ -d $parent_path ]] || die "root-backed extra subvolume is not a directory: $subvolume"
+        fi
+        parent_path=${parent_path%/*}
+        [[ -n $parent_path ]] || parent_path=/
+    done
+
+    if btrfs subvolume show "$subvolume_path" >/dev/null 2>&1; then
+        return 0
+    fi
+    [[ ! -L $subvolume_path ]] || die "root-backed extra subvolume is a symlink: $subvolume"
+
+    if [[ -e $subvolume_path ]]; then
+        [[ -d $subvolume_path ]] || die "root-backed extra subvolume is not a directory: $subvolume"
+        old_path="${subvolume_path}.bootc-installer-old"
+        [[ ! -e $old_path && ! -L $old_path ]] ||
+            die "temporary migration path already exists: $old_path"
+        mv "$subvolume_path" "$old_path"
+        btrfs subvolume create "$subvolume_path"
+        chown root:root "$subvolume_path"
+        chmod 0755 "$subvolume_path"
+        cp -a --reflink=auto "$old_path/." "$subvolume_path/"
+        rm -rf -- "$old_path"
+    else
+        mkdir -p -- "$(dirname -- "$subvolume_path")"
+        btrfs subvolume create "$subvolume_path"
+        chown root:root "$subvolume_path"
+        chmod 0755 "$subvolume_path"
+    fi
+}
+
 prepare_extra_mount_targets() {
     local config_root=$1
     local persistent_var=$2
@@ -144,7 +195,7 @@ configure_extra_mounts() {
     local count=${#extra_mount_devices[@]}
     ((count > 0)) || return 0
 
-    local index label filesystem options mount_point target_path source staging
+    local index label filesystem options mount_point target_path source staging root_subvolume root_subvolume_path
     for ((index = 0; index < count; index++)); do
         label=${extra_mount_labels_resolved[$index]}
         filesystem=${extra_mount_filesystems[$index]}
@@ -153,6 +204,18 @@ configure_extra_mounts() {
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
         source=/dev/disk/by-label/$label
         staging=$work_root/extra-$index
+
+        if root_subvolume=$(root_backed_extra_mount_subvolume "$index"); then
+            root_subvolume_path=$(root_backed_extra_mount_path "$index")
+            prepare_root_backed_extra_mount "$root_subvolume" "$root_subvolume_path"
+            # /var and its descendants already name the selected subvolume in
+            # the installed tree.  Leave that mount in place; the boot karg
+            # will mount the same root-backed subvolume in the deployed system.
+            if [[ $target_path == "$root_subvolume_path" ]]; then
+                log "Prepared root-backed Btrfs subvolume $root_subvolume for $mount_point"
+                continue
+            fi
+        fi
 
         mkdir -p "$staging"
         mount -t "$filesystem" -o "$options" "$source" "$staging"

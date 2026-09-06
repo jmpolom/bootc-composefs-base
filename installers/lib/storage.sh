@@ -8,6 +8,47 @@ declare -ag extra_mount_labels_resolved=()
 declare -ag extra_mount_luks_uuids=()
 declare -ag extra_mount_luks_labels=()
 
+# A root-backed record is the narrow exception to the ordinary extra-mount
+# contract: it selects a Btrfs subvolume in the root filesystem rather than
+# describing a new whole-disk filesystem.  Keep this classifier based only on
+# the normalized record shape.  In particular, do not resolve the future
+# /dev/disk/by-label/root path while validating it as an independent device.
+root_backed_extra_mount_subvolume() {
+    local index=$1
+    local device=${extra_mount_devices[$index]:-}
+    local filesystem=${extra_mount_filesystems[$index]:-}
+    local encrypted=${extra_mount_encrypted[$index]:-false}
+    local label=${extra_mount_labels[$index]:-}
+    local options=${extra_mount_options[$index]:-}
+    local luks_name=${extra_mount_luks_names[$index]:-}
+    local tpm2=${extra_mount_tpm2[$index]:-false}
+    local tpm2_pcrs=${extra_mount_tpm2_pcrs[$index]:-}
+    local tpm2_recovery=${extra_mount_tpm2_recovery[$index]:-false}
+    local expected_prefix="root${physical_var_path:-}"
+    local subvolume=
+    local option_token
+    local -a root_backed_option_tokens=()
+
+    [[ $device == /dev/disk/by-label/root && $label == root && $filesystem == btrfs ]] || return 1
+    [[ $encrypted == false && -z $luks_name && $tpm2 == false && -z $tpm2_pcrs &&
+        $tpm2_recovery == false ]] || return 1
+
+    IFS=, read -r -a root_backed_option_tokens <<< "$options"
+    for option_token in "${root_backed_option_tokens[@]}"; do
+        if [[ $option_token == subvol=* ]]; then
+            [[ -z $subvolume ]] || return 1
+            subvolume=${option_token#subvol=}
+        fi
+    done
+    [[ -n $subvolume && ($subvolume == "$expected_prefix" || $subvolume == "$expected_prefix"/*) ]] ||
+        return 1
+    printf '%s\n' "$subvolume"
+}
+
+is_root_backed_extra_mount() {
+    root_backed_extra_mount_subvolume "$1" >/dev/null
+}
+
 label_for_mount() {
     local mount_point=$1
     local filesystem=$2
@@ -102,6 +143,8 @@ validate_extra_mount_config() {
     local root_luks_name=${luks_name:-root}
     local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_luks_names=()
     local index device device_real mount_point filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery parent
+    local root_backed root_subvolume root_option_token
+    local -a root_option_tokens=()
     seen_luks_names["$root_luks_name"]=1
     if [[ $root_encrypted == true && -e /dev/mapper/$root_luks_name ]]; then
         die "configured root LUKS mapping is already active: $root_luks_name"
@@ -116,18 +159,25 @@ validate_extra_mount_config() {
         tpm2_recovery=${extra_mount_tpm2_recovery[$index]:-false}
         options=${extra_mount_options[$index]:-defaults}
 
-        [[ $device == /dev/* ]] || die "extra_mount_devices[$index] must be a /dev node path"
-        device_real=$(readlink -f -- "$device")
-        [[ -b $device_real ]] || die "extra mount device is not a block device: $device"
-        [[ $(lsblk -ndo TYPE "$device_real") == disk ]] || die "extra mount device must be a whole disk: $device"
-        [[ $device_real != "$target_disk_real" ]] || die "extra mount device reuses target_disk: $device"
-        [[ -z ${seen_devices[$device_real]:-} ]] || die "extra mount device is listed more than once: $device"
-        seen_devices[$device_real]=1
+        root_backed=false
+        if root_subvolume=$(root_backed_extra_mount_subvolume "$index"); then
+            root_backed=true
+        fi
 
-        parent=$(lsblk -nrpo MOUNTPOINTS "$device_real" | awk 'NF { print; exit }')
-        [[ -z $parent ]] || die "extra mount disk has a mounted filesystem at $parent"
-        parent=$(lsblk -nrpo TYPE "$device_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
-        [[ -z $parent ]] || die "extra mount disk has an active mapped descendant of type $parent"
+        [[ $device == /dev/* ]] || die "extra_mount_devices[$index] must be a /dev node path"
+        if [[ $root_backed == false ]]; then
+            device_real=$(readlink -f -- "$device")
+            [[ -b $device_real ]] || die "extra mount device is not a block device: $device"
+            [[ $(lsblk -ndo TYPE "$device_real") == disk ]] || die "extra mount device must be a whole disk: $device"
+            [[ $device_real != "$target_disk_real" ]] || die "extra mount device reuses target_disk: $device"
+            [[ -z ${seen_devices[$device_real]:-} ]] || die "extra mount device is listed more than once: $device"
+            seen_devices[$device_real]=1
+
+            parent=$(lsblk -nrpo MOUNTPOINTS "$device_real" | awk 'NF { print; exit }')
+            [[ -z $parent ]] || die "extra mount disk has a mounted filesystem at $parent"
+            parent=$(lsblk -nrpo TYPE "$device_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
+            [[ -z $parent ]] || die "extra mount disk has an active mapped descendant of type $parent"
+        fi
 
         [[ $mount_point == /* ]] || die "extra mount point must be absolute: $mount_point"
         [[ $(realpath -m -- "$mount_point") == "$mount_point" ]] || die "extra mount point is not normalized: $mount_point"
@@ -147,7 +197,15 @@ validate_extra_mount_config() {
             xfs) require_commands mkfs.xfs ;;
             *) die "extra_mount_filesystems[$index] must be btrfs, ext4, or xfs" ;;
         esac
-        validate_created_mount_options "$options" "$filesystem" "extra mount options for $mount_point"
+        if [[ $root_backed == true ]]; then
+            IFS=, read -r -a root_option_tokens <<< "$options"
+            for root_option_token in "${root_option_tokens[@]}"; do
+                [[ $root_option_token != ro && $root_option_token != subvolid=* ]] ||
+                    die "extra mount options for $mount_point cannot contain installer-incompatible option: $root_option_token"
+            done
+        else
+            validate_created_mount_options "$options" "$filesystem" "extra mount options for $mount_point"
+        fi
         [[ $options != *:* ]] || die "extra mount options cannot contain ':': $mount_point"
         is_boolean "$encrypted" || die "extra_mount_encrypted[$index] must be true or false"
         is_boolean "$tpm2" || die "extra_mount_tpm2[$index] must be true or false"
@@ -166,9 +224,13 @@ validate_extra_mount_config() {
         [[ $label =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "extra mount label must be lower case: $label"
         label_limit=$(filesystem_label_limit "$filesystem")
         ((${#label} <= label_limit)) || die "$filesystem label is too long for $mount_point: $label"
-        [[ -z ${seen_labels[$label]:-} ]] || die "extra mount label is duplicated: $label"
-        seen_labels[$label]=1
-        assert_label_available "/dev/disk/by-label/$label" "$device_real"
+        if [[ $root_backed == true ]]; then
+            [[ $label == root ]] || die "root-backed extra mount must use label root: $mount_point"
+        else
+            [[ -z ${seen_labels[$label]:-} ]] || die "extra mount label is duplicated: $label"
+            seen_labels[$label]=1
+            assert_label_available "/dev/disk/by-label/$label" "$device_real"
+        fi
 
         luks_name=${extra_mount_luks_names[$index]:-${label}_crypt}
         if [[ $encrypted == true ]]; then
@@ -501,6 +563,10 @@ prepare_extra_filesystems() {
     log "Preparing $count additional state disk(s)"
     local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid key_file
     for ((index = 0; index < count; index++)); do
+        if is_root_backed_extra_mount "$index"; then
+            log "Using root-backed Btrfs subvolume for ${extra_mount_points[$index]}"
+            continue
+        fi
         device=${extra_mount_devices[$index]}
         device_real=$(readlink -f -- "$device")
         mount_point=${extra_mount_points[$index]}
