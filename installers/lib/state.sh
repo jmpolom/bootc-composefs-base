@@ -73,14 +73,64 @@ configure_state_subvolumes() {
 state_path_for_mount() {
     local persistent_var=$1
     local mount_point=$2
-    local runtime_path
-    runtime_path=$(runtime_path_for_mount "$mount_point")
 
-    case "$runtime_path" in
+    case "$mount_point" in
         /var) printf '%s\n' "$persistent_var" ;;
-        /var/*) printf '%s/%s\n' "$persistent_var" "${runtime_path#/var/}" ;;
+        /var/*) printf '%s/%s\n' "$persistent_var" "${mount_point#/var/}" ;;
         *) return 1 ;;
     esac
+}
+
+mount_target_path() {
+    local config_root=$1
+    local persistent_var=$2
+    local mount_point=$3
+    local state_path
+
+    if state_path=$(state_path_for_mount "$persistent_var" "$mount_point"); then
+        printf '%s\n' "$state_path"
+    else
+        printf '%s%s\n' "$config_root" "$mount_point"
+    fi
+}
+
+prepare_mount_target() {
+    local requested_path=$1
+    local target_path=$2
+    local parent_path=$target_path
+
+    # Check every component before test -d: test -d follows symlinks.  Walking
+    # through all ancestors prevents mkdir or migration from following a
+    # symlink, including when the requested descendant already exists.
+    while [[ $parent_path != / ]]; do
+        if [[ -L $parent_path ]]; then
+            die "extra mount target is a symlink: $requested_path"
+        fi
+        if [[ -e $parent_path ]]; then
+            [[ -d $parent_path ]] || die "extra mount target is not a directory: $requested_path"
+        fi
+        parent_path=${parent_path%/*}
+        [[ -n $parent_path ]] || parent_path=/
+    done
+
+    [[ -e $target_path ]] && return 0
+
+    mkdir -p -- "$target_path"
+    [[ ! -L $target_path && -d $target_path ]] ||
+        die "extra mount target could not be created as a directory: $requested_path"
+}
+
+prepare_extra_mount_targets() {
+    local config_root=$1
+    local persistent_var=$2
+    local count=${#extra_mount_devices[@]}
+    local index mount_point target_path
+
+    for ((index = 0; index < count; index++)); do
+        mount_point=${extra_mount_points[$index]}
+        target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
+        prepare_mount_target "$mount_point" "$target_path"
+    done
 }
 
 clear_directory() {
@@ -89,17 +139,18 @@ clear_directory() {
 }
 
 configure_extra_mounts() {
-    local persistent_var=$1
+    local config_root=$1
+    local persistent_var=$2
     local count=${#extra_mount_devices[@]}
     ((count > 0)) || return 0
 
-    local index label filesystem options mount_point runtime_path source staging state_path
+    local index label filesystem options mount_point target_path source staging
     for ((index = 0; index < count; index++)); do
         label=${extra_mount_labels_resolved[$index]}
         filesystem=${extra_mount_filesystems[$index]}
         options=${extra_mount_options[$index]:-defaults}
         mount_point=${extra_mount_points[$index]}
-        runtime_path=$(runtime_path_for_mount "$mount_point")
+        target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
         source=/dev/disk/by-label/$label
         staging=$work_root/extra-$index
 
@@ -107,23 +158,27 @@ configure_extra_mounts() {
         mount -t "$filesystem" -o "$options" "$source" "$staging"
         cleanup_mounts+=("$staging")
 
-        if state_path=$(state_path_for_mount "$persistent_var" "$mount_point"); then
+        if state_path_for_mount "$persistent_var" "$mount_point" >/dev/null; then
             log "Moving existing state for $mount_point onto $source"
-            mkdir -p "$state_path"
             chown root:root "$staging"
             chmod 0755 "$staging"
-            label_new_state_path "$staging" "$runtime_path" "$state_path"
-            cp -a --reflink=auto "$state_path/." "$staging/"
-            clear_directory "$state_path"
+            label_new_state_path "$staging" "$mount_point" "$target_path"
+            cp -a --reflink=auto "$target_path/." "$staging/"
+            clear_directory "$target_path"
             umount "$staging"
             unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
 
-            mount -t "$filesystem" -o "$options" "$source" "$state_path"
-            cleanup_mounts+=("$state_path")
+            mount -t "$filesystem" -o "$options" "$source" "$target_path"
+            cleanup_mounts+=("$target_path")
         else
-            log "$mount_point has no pre-existing bootc state path to migrate"
+            log "Migrating existing content for literal target $mount_point onto $source"
+            cp -a --reflink=auto "$target_path/." "$staging/"
+            clear_directory "$target_path"
             umount "$staging"
             unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
+
+            mount -t "$filesystem" -o "$options" "$source" "$target_path"
+            cleanup_mounts+=("$target_path")
         fi
     done
 }

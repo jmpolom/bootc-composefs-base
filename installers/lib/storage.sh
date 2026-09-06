@@ -5,7 +5,6 @@ declare -ag cleanup_mounts=()
 declare -ag opened_luks_names=()
 declare -ag temporary_luks_key_files=()
 declare -ag extra_mount_labels_resolved=()
-declare -ag extra_mount_runtime_paths=()
 declare -ag extra_mount_luks_uuids=()
 declare -ag extra_mount_luks_labels=()
 
@@ -35,27 +34,6 @@ filesystem_label_limit() {
         ext4) printf '%s\n' 16 ;;
         btrfs) printf '%s\n' 255 ;;
         *) die "unsupported extra filesystem: $1" ;;
-    esac
-}
-
-runtime_path_for_mount() {
-    local mount_point=$1
-    case "$mount_point" in
-        /home) printf '%s\n' /var/home ;;
-        /home/*) printf '/var/home/%s\n' "${mount_point#/home/}" ;;
-        /opt) printf '%s\n' /var/opt ;;
-        /opt/*) printf '/var/opt/%s\n' "${mount_point#/opt/}" ;;
-        /root) printf '%s\n' /var/roothome ;;
-        /root/*) printf '/var/roothome/%s\n' "${mount_point#/root/}" ;;
-        /usr/local) printf '%s\n' /var/usrlocal ;;
-        /usr/local/*) printf '/var/usrlocal/%s\n' "${mount_point#/usr/local/}" ;;
-        /srv) printf '%s\n' /var/srv ;;
-        /srv/*) printf '/var/srv/%s\n' "${mount_point#/srv/}" ;;
-        /mnt) printf '%s\n' /var/mnt ;;
-        /mnt/*) printf '/var/mnt/%s\n' "${mount_point#/mnt/}" ;;
-        /media) printf '%s\n' /var/media ;;
-        /media/*) printf '/var/media/%s\n' "${mount_point#/media/}" ;;
-        *) printf '%s\n' "$mount_point" ;;
     esac
 }
 
@@ -122,8 +100,8 @@ validate_extra_mount_config() {
     done
 
     local root_luks_name=${luks_name:-root}
-    local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_runtime_paths=() seen_luks_names=()
-    local index device device_real mount_point runtime_path filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery parent
+    local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_luks_names=()
+    local index device device_real mount_point filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery parent
     seen_luks_names["$root_luks_name"]=1
     if [[ $root_encrypted == true && -e /dev/mapper/$root_luks_name ]]; then
         die "configured root LUKS mapping is already active: $root_luks_name"
@@ -162,9 +140,6 @@ validate_extra_mount_config() {
         validate_backend_mount_target "$mount_point"
         [[ -z ${seen_paths[$mount_point]:-} ]] || die "extra mount point is listed more than once: $mount_point"
         seen_paths[$mount_point]=1
-        runtime_path=$(runtime_path_for_mount "$mount_point")
-        [[ -z ${seen_runtime_paths[$runtime_path]:-} ]] || die "extra mount point aliases an existing target: $mount_point"
-        seen_runtime_paths[$runtime_path]=1
 
         case "$filesystem" in
             btrfs) require_commands mkfs.btrfs ;;
@@ -210,28 +185,27 @@ validate_extra_mount_config() {
         fi
 
         extra_mount_labels_resolved[index]=$label
-        extra_mount_runtime_paths[index]=$runtime_path
     done
 
     local earlier
     for ((index = 0; index < count; index++)); do
         for ((earlier = 0; earlier < index; earlier++)); do
-            if [[ ${extra_mount_runtime_paths[$earlier]} == "${extra_mount_runtime_paths[$index]}"/* ]]; then
+            if [[ ${extra_mount_points[$earlier]} == "${extra_mount_points[$index]}"/* ]]; then
                 die "parent extra mount ${extra_mount_points[$index]} must precede ${extra_mount_points[$earlier]}"
             fi
         done
     done
 
-    if [[ $separate_var == true && -n ${seen_runtime_paths["/var"]:-} ]]; then
+    if [[ $separate_var == true && -n ${seen_paths["/var"]:-} ]]; then
         die "separate_var conflicts with an extra disk mounted at /var"
     fi
-    if [[ $separate_home == true && -n ${seen_runtime_paths["/var/home"]:-} ]]; then
-        die "separate_home conflicts with an extra disk mounted at /home"
+    if [[ $separate_home == true && -n ${seen_paths["/var/home"]:-} ]]; then
+        die "separate_home conflicts with an extra disk mounted at /var/home"
     fi
-    if [[ $separate_opt == true && -n ${seen_runtime_paths["/var/opt"]:-} ]]; then
-        die "separate_opt conflicts with an extra disk mounted at /opt"
+    if [[ $separate_opt == true && -n ${seen_paths["/var/opt"]:-} ]]; then
+        die "separate_opt conflicts with an extra disk mounted at /var/opt"
     fi
-    if [[ -n ${seen_runtime_paths["/var"]:-} && ($separate_home == true || $separate_opt == true) ]]; then
+    if [[ -n ${seen_paths["/var"]:-} && ($separate_home == true || $separate_opt == true) ]]; then
         die "an extra /var disk cannot be combined with separate_home or separate_opt subvolumes"
     fi
 }

@@ -412,16 +412,16 @@ append_common_kargs() {
         [[ -n $karg ]] && bootc_args+=("--karg=$karg")
     done
 
-    local index label filesystem options runtime_path uuid luks_name luks_options
+    local index label filesystem options mount_point uuid luks_name luks_options
     for ((index = 0; index < ${#extra_mount_devices[@]}; index++)); do
         label=${extra_mount_labels_resolved[$index]}
         filesystem=${extra_mount_filesystems[$index]}
         options=${extra_mount_options[$index]:-defaults}
-        runtime_path=${extra_mount_runtime_paths[$index]}
-        if [[ $runtime_path == /var ]]; then
+        mount_point=${extra_mount_points[$index]}
+        if [[ $mount_point == /var ]]; then
             append_external_var_karg "$label" "$filesystem" "$options"
         else
-            bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${runtime_path}:${filesystem}:${options}")
+            bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${mount_point}:${filesystem}:${options}")
         fi
 
         uuid=${extra_mount_luks_uuids[$index]:-}
@@ -550,8 +550,9 @@ run_installer() {
     persistent_var="$install_root$physical_var_path"
     backend_callback locate_deployment
     backend_callback postprocess
+    prepare_extra_mount_targets "$config_root" "$persistent_var"
     configure_state_subvolumes "$persistent_var"
-    configure_extra_mounts "$persistent_var"
+    configure_extra_mounts "$config_root" "$persistent_var"
     configure_first_user "$config_root" "$persistent_var"
     relabel_target_paths "$config_root"
     finish_installation
