@@ -479,6 +479,7 @@ finish_installation() {
 
 cleanup() {
     local status=$?
+    local cleanup_status=0
     trap - EXIT INT TERM
     set +e
 
@@ -486,7 +487,10 @@ cleanup() {
     for ((index = ${#cleanup_mounts[@]} - 1; index >= 0; index--)); do
         mountpoint=${cleanup_mounts[$index]}
         if findmnt --mountpoint "$mountpoint" >/dev/null 2>&1; then
-            umount "$mountpoint"
+            if ! umount "$mountpoint"; then
+                printf 'Cleanup failed to unmount %s\n' "$mountpoint" >&2
+                cleanup_status=1
+            fi
         fi
     done
 
@@ -494,15 +498,24 @@ cleanup() {
     for ((luks_index = ${#opened_luks_names[@]} - 1; luks_index >= 0; luks_index--)); do
         open_name=${opened_luks_names[$luks_index]}
         if [[ -e /dev/mapper/$open_name ]]; then
-            cryptsetup close "$open_name"
+            if ! cryptsetup close "$open_name"; then
+                printf 'Cleanup failed to close mapper %s\n' "$open_name" >&2
+                cleanup_status=1
+            fi
         fi
     done
 
     local key_file
     for key_file in "${temporary_luks_key_files[@]}"; do
-        [[ -n $key_file ]] && rm -f -- "$key_file"
+        if [[ -n $key_file ]] && ! rm -f -- "$key_file"; then
+            printf 'Cleanup failed to remove temporary key %s\n' "$key_file" >&2
+            cleanup_status=1
+        fi
     done
 
+    if [[ $status -eq 0 && $cleanup_status -ne 0 ]]; then
+        status=$cleanup_status
+    fi
     if [[ $status -eq 0 && $install_complete == true ]]; then
         log "Installation completed successfully"
     elif [[ $status -ne 0 ]]; then
