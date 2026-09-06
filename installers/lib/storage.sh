@@ -296,6 +296,7 @@ remove_temporary_luks_key() {
 
 root_partition_guid() {
     if [[ -n ${root_partition_type_guid:-} ]]; then
+        validate_canonical_guid "$root_partition_type_guid" root_partition_type_guid
         printf '%s\n' "$root_partition_type_guid"
         return
     fi

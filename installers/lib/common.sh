@@ -10,6 +10,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/state.sh"
 
 declare -g install_complete=false
 declare -g tpm_enrollment_requested=false
+declare -g recovery_enrollment_requested=false
+declare -g installer_config_file=
 
 log() {
     printf '%s\n' "$*"
@@ -57,6 +59,9 @@ parse_options() {
     # The configuration is intentionally a shell environment file and is trusted code.
     # shellcheck source=/dev/null
     source "$config_arg"
+    # Keep the exact CLI-supplied path for preflight alias checks.  Set this after
+    # sourcing so a configuration setting cannot replace the trusted value.
+    installer_config_file=$config_arg
     destructive_confirmed=$yes_arg
     if [[ $trace_arg == true ]]; then
         set -x
@@ -118,6 +123,99 @@ require_commands() {
     for command in "$@"; do
         command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
     done
+}
+
+is_canonical_guid() {
+    [[ ${1:-} =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+}
+
+validate_canonical_guid() {
+    local guid=$1 description=${2:-GUID}
+    is_canonical_guid "$guid" ||
+        die "$description must use canonical 8-4-4-4-12 hexadecimal syntax: $guid"
+}
+
+require_readable_file() {
+    local path=$1 description=${2:-file}
+    [[ -f $path && -r $path ]] || die "$description is not a readable regular file: $path"
+}
+
+validate_backend_templates() {
+    local description=$1
+    shift
+    (($# > 0)) || die "at least one backend template is required"
+    local path
+    for path in "$@"; do
+        require_readable_file "$path" "$description"
+    done
+}
+
+validate_backend_tools() {
+    (($# > 0)) || die "at least one backend tool is required"
+    require_commands "$@"
+}
+
+validate_usable_directory() {
+    local path=$1 description=${2:-directory} allow_missing=${3:-false}
+    [[ -n $path ]] || die "$description must not be empty"
+
+    if [[ -e $path || -L $path ]]; then
+        [[ ! -L $path && -d $path && -r $path && -w $path && -x $path ]] ||
+            die "$description is not a usable directory: $path"
+        return 0
+    fi
+
+    [[ $allow_missing == true ]] || die "$description does not exist: $path"
+    local parent=$path
+    while [[ ! -e $parent && ! -L $parent ]]; do
+        [[ $parent != / ]] || break
+        parent=${parent%/*}
+        [[ -n $parent ]] || parent=/
+    done
+    [[ ! -L $parent && -d $parent && -r $parent && -w $parent && -x $parent ]] ||
+        die "parent of $description is not a usable directory: $path"
+}
+
+validate_work_root() {
+    local path=${1:-${work_root:-}}
+    validate_usable_directory "$path" work_root true
+}
+
+validate_var_tmp() {
+    local path=${1:-/var/tmp}
+    validate_usable_directory "$path" /var/tmp false
+}
+
+validate_recovery_output_target() {
+    local path=$1
+    [[ $path == /* ]] || die "recovery_key_output_file must be absolute"
+    [[ $(realpath -m -- "$path") == "$path" ]] ||
+        die "recovery_key_output_file is not normalized: $path"
+    [[ ! -L $path ]] || die "recovery_key_output_file must not be a symlink"
+
+    local parent=${path%/*}
+    [[ -n $parent ]] || parent=/
+    validate_usable_directory "$parent" "recovery output parent" true
+    if [[ -e $path ]]; then
+        [[ -f $path ]] ||
+            die "recovery_key_output_file must be a regular file: $path"
+    fi
+}
+
+paths_alias() {
+    local first=$1 second=$2
+    [[ -e $first && -e $second ]] || return 1
+    [[ $(realpath -m -- "$first") == "$(realpath -m -- "$second")" ]]
+}
+
+validate_recovery_output_aliases() {
+    local output=$1 config_file=$2 password_file=${3:-}
+    if [[ -n $config_file ]] && paths_alias "$output" "$config_file"; then
+        die "recovery_key_output_file must not alias the configuration file: $output"
+    fi
+    if [[ -n $password_file ]] && paths_alias "$output" "$password_file"; then
+        die "recovery_key_output_file must not alias luks_password_file: $output"
+    fi
 }
 
 xtrace_secret_start() {
@@ -206,6 +304,10 @@ validate_common_config() {
     [[ $state_mount_options != *:* ]] || die "state_mount_options cannot contain ':'"
     [[ $efi_size_mib =~ ^[0-9]+$ && $efi_size_mib -ge 128 ]] || die "efi_size_mib must be at least 128"
     [[ $boot_size_mib =~ ^[0-9]+$ && $boot_size_mib -ge 512 ]] || die "boot_size_mib must be at least 512"
+    # Resolve and validate the root partition type before any storage operation.
+    root_partition_guid >/dev/null
+    validate_work_root
+    validate_var_tmp
 
     local setting
     for setting in root_encrypted root_tpm2 root_tpm2_recovery luks_ephemeral_key separate_var separate_home separate_opt; do
@@ -271,11 +373,11 @@ validate_common_config() {
     if [[ $recovery_requested == true ]]; then
         [[ -n $recovery_key_output_file ]] ||
             die "recovery_key_output_file is required when recovery enrollment is enabled"
-        [[ $recovery_key_output_file == /* ]] || die "recovery_key_output_file must be absolute"
-        [[ $(realpath -m -- "$recovery_key_output_file") == "$recovery_key_output_file" ]] ||
-            die "recovery_key_output_file is not normalized: $recovery_key_output_file"
-        [[ ! -L $recovery_key_output_file ]] || die "recovery_key_output_file must not be a symlink"
+        validate_recovery_output_target "$recovery_key_output_file"
+        validate_recovery_output_aliases "$recovery_key_output_file" \
+            "$installer_config_file" "$luks_password_file"
     fi
+    recovery_enrollment_requested=$recovery_requested
     if [[ $tpm_enrollment_requested == true ]]; then
         require_commands systemd-cryptenroll
     fi
@@ -425,14 +527,7 @@ run_installer() {
     backend_callback preflight
 
     mkdir -p "$work_root"
-    local recovery_requested=$root_tpm2_recovery
-    local index
-    for ((index = 0; index < ${#extra_mount_devices[@]}; index++)); do
-        if [[ ${extra_mount_tpm2_recovery[$index]:-false} == true ]]; then
-            recovery_requested=true
-        fi
-    done
-    [[ $recovery_requested == true ]] && initialize_recovery_key_output
+    [[ $recovery_enrollment_requested == true ]] && initialize_recovery_key_output
 
     prepare_storage
     backend_callback build_bootc_args
