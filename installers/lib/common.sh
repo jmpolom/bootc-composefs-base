@@ -120,6 +120,37 @@ require_commands() {
     done
 }
 
+xtrace_secret_start() {
+    case $- in
+        *x*) set +x; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+xtrace_secret_restore() {
+    if [[ $1 == true ]]; then
+        set -x
+    fi
+    return 0
+}
+
+secret_variable_is_set() {
+    local variable_name=$1
+    local trace_was_enabled=false
+    local status
+
+    if xtrace_secret_start; then
+        trace_was_enabled=true
+    fi
+    if [[ -n ${!variable_name:-} ]]; then
+        status=0
+    else
+        status=1
+    fi
+    xtrace_secret_restore "$trace_was_enabled"
+    return "$status"
+}
+
 require_full_capabilities() {
     local last_cap expected_hex cap_eff cap_bnd
 
@@ -200,7 +231,8 @@ validate_common_config() {
 
     if [[ -n ${user_name:-} ]]; then
         [[ $user_name =~ ^[a-z_][a-z0-9_-]*$ ]] || die "user_name is invalid"
-        [[ -z ${user_password:-} ]] || die "use user_password_hash, not a plaintext user_password"
+        secret_variable_is_set user_password &&
+            die "use user_password_hash, not a plaintext user_password"
     fi
 
     target_disk_real=$(readlink -f -- "$target_disk")

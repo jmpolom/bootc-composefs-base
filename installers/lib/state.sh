@@ -154,8 +154,8 @@ configure_first_user() {
     fi
     useradd "${useradd_args[@]}" "$user_name"
 
-    if [[ -n ${user_password_hash:-} ]]; then
-        usermod --root "$config_root" --password "$user_password_hash" "$user_name"
+    if secret_variable_is_set user_password_hash; then
+        apply_user_password_hash "$config_root" "$user_name"
     else
         usermod --root "$config_root" --lock "$user_name"
     fi
@@ -167,6 +167,24 @@ configure_first_user() {
     mkdir -p "$persistent_var/home/$user_name"
     chmod 0700 "$persistent_var/home/$user_name"
     chown "$uid:$gid" "$persistent_var/home/$user_name"
+}
+
+apply_user_password_hash() {
+    local config_root=$1
+    local user_name=$2
+    local trace_was_enabled=false
+    local status
+
+    if xtrace_secret_start; then
+        trace_was_enabled=true
+    fi
+    if usermod --root "$config_root" --password "$user_password_hash" "$user_name"; then
+        status=0
+    else
+        status=$?
+    fi
+    xtrace_secret_restore "$trace_was_enabled"
+    return "$status"
 }
 
 relabel_target_paths() {
