@@ -8,6 +8,58 @@ declare -ag extra_mount_labels_resolved=()
 declare -ag extra_mount_luks_uuids=()
 declare -ag extra_mount_luks_labels=()
 
+# Convert the legacy state-subvolume switches into ordinary root-backed extra
+# mount records before any indexed-array or mount-target validation runs.  The
+# generated records deliberately carry no provenance: every later storage
+# operation sees the same shape whether a record came from a shortcut or was
+# written explicitly by the user.
+normalize_extra_mount_shortcuts() {
+    local shortcut value target subvolume index
+
+    for shortcut in separate_var separate_home separate_opt; do
+        value=${!shortcut:-false}
+        is_boolean "$value" || die "$shortcut must be true or false"
+        [[ $value == true ]] || continue
+
+        case "$shortcut" in
+            separate_var)
+                target=/var
+                subvolume=root${physical_var_path}
+                ;;
+            separate_home)
+                target=/var/home
+                subvolume=root${physical_var_path}/home
+                ;;
+            separate_opt)
+                target=/var/opt
+                subvolume=root${physical_var_path}/opt
+                ;;
+        esac
+
+        for index in "${!extra_mount_points[@]}"; do
+            [[ ${extra_mount_points[$index]} != "$target" ]] ||
+                die "$shortcut conflicts with an explicit extra mount at $target"
+        done
+
+        index=${#extra_mount_devices[@]}
+        extra_mount_devices[index]=/dev/disk/by-label/root
+        extra_mount_points[index]=$target
+        extra_mount_filesystems[index]=btrfs
+        extra_mount_encrypted[index]=false
+        extra_mount_labels[index]=root
+        extra_mount_options[index]="subvol=$subvolume,$state_mount_options"
+        extra_mount_luks_names[index]=
+        extra_mount_tpm2[index]=false
+        extra_mount_tpm2_pcrs[index]=
+        extra_mount_tpm2_recovery[index]=false
+        log "Normalized $shortcut shortcut to root-backed extra mount at $target"
+    done
+
+    # Do not leave shortcut state available to any downstream phase.  The
+    # normalized arrays are the sole representation after this point.
+    unset separate_var separate_home separate_opt
+}
+
 # A root-backed record is the narrow exception to the ordinary extra-mount
 # contract: it selects a Btrfs subvolume in the root filesystem rather than
 # describing a new whole-disk filesystem.  Keep this classifier based only on
@@ -258,18 +310,6 @@ validate_extra_mount_config() {
         done
     done
 
-    if [[ $separate_var == true && -n ${seen_paths["/var"]:-} ]]; then
-        die "separate_var conflicts with an extra disk mounted at /var"
-    fi
-    if [[ $separate_home == true && -n ${seen_paths["/var/home"]:-} ]]; then
-        die "separate_home conflicts with an extra disk mounted at /var/home"
-    fi
-    if [[ $separate_opt == true && -n ${seen_paths["/var/opt"]:-} ]]; then
-        die "separate_opt conflicts with an extra disk mounted at /var/opt"
-    fi
-    if [[ -n ${seen_paths["/var"]:-} && ($separate_home == true || $separate_opt == true) ]]; then
-        die "an extra /var disk cannot be combined with separate_home or separate_opt subvolumes"
-    fi
 }
 initialize_recovery_key_output() {
     [[ -n $recovery_key_output_file ]] || return 0

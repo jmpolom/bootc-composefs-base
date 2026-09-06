@@ -79,7 +79,6 @@ composefs_build_bootc_args() {
     [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
     [[ $allow_missing_verity == true ]] && bootc_args+=(--allow-missing-verity)
     append_common_kargs "$physical_var_path" "$root_setup_unit"
-    append_state_kargs "$physical_var_path" "$root_setup_unit"
 }
 
 composefs_append_external_var_karg() {
@@ -87,13 +86,6 @@ composefs_append_external_var_karg() {
     local filesystem=$2
     local options=$3
     bootc_args+=("--karg=rd.systemd.mount-extra=/dev/disk/by-label/${label}:/sysroot${physical_var_path}:${filesystem}:${options},x-systemd.before=${root_setup_unit}")
-}
-
-composefs_append_separate_var_karg() {
-    local source=$1
-    local options=$2
-    local subvolume=$3
-    bootc_args+=("--karg=rd.systemd.mount-extra=${source}:/sysroot${physical_var_path}:btrfs:subvol=${subvolume},${options},x-systemd.before=${root_setup_unit}")
 }
 
 composefs_locate_deployment() {

@@ -288,10 +288,6 @@ append_external_var_karg() {
     backend_callback append_external_var_karg "$@"
 }
 
-append_separate_var_karg() {
-    backend_callback append_separate_var_karg "$@"
-}
-
 
 validate_common_config() {
     [[ $destructive_confirmed == true ]] || die "-y is required to authorize erasing the configured disks"
@@ -311,7 +307,7 @@ validate_common_config() {
     validate_var_tmp
 
     local setting
-    for setting in root_encrypted root_tpm2 root_tpm2_recovery luks_ephemeral_key separate_var separate_home separate_opt; do
+    for setting in root_encrypted root_tpm2 root_tpm2_recovery luks_ephemeral_key; do
         is_boolean "${!setting}" || die "$setting must be true or false"
     done
 
@@ -440,24 +436,6 @@ append_common_kargs() {
     done
 }
 
-append_state_kargs() {
-    local physical_var_path=$1
-    local root_setup_unit=$2
-    local source=/dev/disk/by-label/root
-    local options=$state_mount_options
-    local var_subvolume="root$physical_var_path"
-
-    if [[ $separate_var == true ]]; then
-        append_separate_var_karg "$source" "$options" "$var_subvolume"
-    fi
-    if [[ $separate_home == true ]]; then
-        bootc_args+=("--karg=systemd.mount-extra=${source}:/var/home:btrfs:subvol=${var_subvolume}/home,${options}")
-    fi
-    if [[ $separate_opt == true ]]; then
-        bootc_args+=("--karg=systemd.mount-extra=${source}:/var/opt:btrfs:subvol=${var_subvolume}/opt,${options}")
-    fi
-}
-
 run_bootc_install() {
     local status
 
@@ -537,6 +515,7 @@ run_installer() {
     parse_options "$@"
     set_defaults
     backend_callback set_defaults
+    normalize_extra_mount_shortcuts
     validate_common_config
     backend_callback preflight
 
@@ -551,7 +530,6 @@ run_installer() {
     backend_callback locate_deployment
     backend_callback postprocess
     prepare_extra_mount_targets "$config_root" "$persistent_var"
-    configure_state_subvolumes "$persistent_var"
     configure_extra_mounts "$config_root" "$persistent_var"
     configure_first_user "$config_root" "$persistent_var"
     relabel_target_paths "$config_root"
