@@ -300,8 +300,9 @@ validate_common_config() {
     [[ -n ${target_disk:-} ]] || die "target_disk is required"
     [[ $target_disk == /dev/disk/by-* ]] || die "target_disk must use a /dev/disk/by-* path"
     [[ $luks_name =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "luks_name must be lower case and path-safe"
-    [[ $root_mount_options != *:* ]] || die "root_mount_options cannot contain ':'"
+    validate_created_mount_options "$root_mount_options" btrfs root_mount_options
     [[ $state_mount_options != *:* ]] || die "state_mount_options cannot contain ':'"
+    validate_created_mount_options "$state_mount_options" btrfs state_mount_options
     [[ $efi_size_mib =~ ^[0-9]+$ && $efi_size_mib -ge 128 ]] || die "efi_size_mib must be at least 128"
     [[ $boot_size_mib =~ ^[0-9]+$ && $boot_size_mib -ge 512 ]] || die "boot_size_mib must be at least 512"
     # Resolve and validate the root partition type before any storage operation.

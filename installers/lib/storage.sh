@@ -59,6 +59,31 @@ runtime_path_for_mount() {
     esac
 }
 
+# Reject mount options that would make installer-created filesystems read-only
+# or select an existing Btrfs subvolume.  Match comma-delimited option tokens
+# exactly so option names and values that merely contain these strings remain
+# valid.  The caller is responsible for rejecting ':' where its karg format
+# uses colon-delimited mount-extra serialization.
+validate_created_mount_options() {
+    local options=$1
+    local filesystem=$2
+    local description=${3:-mount options}
+    local -a option_tokens=()
+    local option_token
+
+    IFS=, read -r -a option_tokens <<< "$options"
+    for option_token in "${option_tokens[@]}"; do
+        case "$filesystem:$option_token" in
+            btrfs:ro | btrfs:subvol=* | btrfs:subvolid=*)
+                die "$description cannot contain installer-incompatible option: $option_token"
+                ;;
+            ext4:ro | xfs:ro)
+                die "$description cannot contain installer-incompatible option: $option_token"
+                ;;
+        esac
+    done
+}
+
 # Validate the indexes of one of the per-extra-mount indexed arrays.  Required
 # arrays must be dense because all storage operations consume them by position;
 # optional arrays may omit an entry, but an entry must still belong to a real
@@ -147,6 +172,7 @@ validate_extra_mount_config() {
             xfs) require_commands mkfs.xfs ;;
             *) die "extra_mount_filesystems[$index] must be btrfs, ext4, or xfs" ;;
         esac
+        validate_created_mount_options "$options" "$filesystem" "extra mount options for $mount_point"
         [[ $options != *:* ]] || die "extra mount options cannot contain ':': $mount_point"
         is_boolean "$encrypted" || die "extra_mount_encrypted[$index] must be true or false"
         is_boolean "$tpm2" || die "extra_mount_tpm2[$index] must be true or false"
