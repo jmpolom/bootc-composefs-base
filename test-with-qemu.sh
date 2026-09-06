@@ -14,6 +14,7 @@ QEMU_WORK_DIR=${QEMU_WORK_DIR:-$SCRIPT_DIR/qemu-test}
 FCOS_STREAM=${FCOS_STREAM:-stable}
 FCOS_ISO=${FCOS_ISO:-}
 INSTALLER_BACKEND=${INSTALLER_BACKEND:-composefs}
+INSTALLER_NAME=
 LUKS_PASSWORD_FILE=${LUKS_PASSWORD_FILE:-}
 RECOVERY_KEY_FILE=${RECOVERY_KEY_FILE:-}
 TARGET_DISK_SIZE=${TARGET_DISK_SIZE:-40G}
@@ -51,7 +52,8 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -w DIR      Working directory below the project root.      [QEMU_WORK_DIR]
   -s STREAM   Fedora CoreOS stream.                          [FCOS_STREAM]
   -I ISO      Use this Fedora CoreOS live ISO.               [FCOS_ISO]
-  -b BACKEND  Installer backend: composefs or ostree.        [INSTALLER_BACKEND]
+  -b BACKEND  Installer backend identifier (default: composefs).
+              The image must provide install-BACKEND.sh.       [INSTALLER_BACKEND]
   -P FILE     LUKS-password payload; the config selects its guest path.
                                                                [LUKS_PASSWORD_FILE]
   -k FILE     Host recovery-key output file.                 [RECOVERY_KEY_FILE]
@@ -140,6 +142,12 @@ normalize_bootc_image_reference() {
     esac
 }
 
+validate_backend_identifier() {
+    [[ $INSTALLER_BACKEND =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
+        die "invalid installer backend identifier: $INSTALLER_BACKEND"
+    INSTALLER_NAME=install-$INSTALLER_BACKEND.sh
+}
+
 absolute_existing_path() {
     local path=$1
     local directory basename
@@ -164,7 +172,7 @@ validate_configuration() {
 
     case "$RUN_MODE" in install | boot | all) ;; *) die "invalid run mode: $RUN_MODE" ;; esac
     case "$FCOS_STREAM" in stable | testing | next) ;; *) die "invalid Fedora CoreOS stream: $FCOS_STREAM" ;; esac
-    case "$INSTALLER_BACKEND" in composefs | ostree) ;; *) die "invalid installer backend: $INSTALLER_BACKEND" ;; esac
+    validate_backend_identifier
     [[ $QEMU_CPUS =~ ^[1-9][0-9]*$ ]] || die "guest CPU count must be a positive integer"
     [[ $BOOT_MENU_DELAY_SECS =~ ^[0-9]+$ ]] || die "BOOT_MENU_DELAY_SECS must be a non-negative integer"
     [[ $GRUB_KERNEL_LINE_DOWNS =~ ^[0-9]+$ ]] || die "GRUB_KERNEL_LINE_DOWNS must be a non-negative integer"
@@ -461,11 +469,10 @@ stage_installer_config() {
 }
 
 create_live_wrapper() {
-    local installer_name=install-$INSTALLER_BACKEND.sh
     {
         printf '#!/usr/bin/env bash\n'
         printf 'image_ref=%q\n' "$PODMAN_IMAGE_REF"
-        printf 'installer_name=%q\n' "$installer_name"
+        printf 'installer_name=%q\n' "$INSTALLER_NAME"
         printf 'persistent_dir=%q\n' "$GUEST_PERSISTENT_DIR"
         printf 'install_config=%q\n' "$GUEST_INSTALL_CONFIG"
         printf 'runtime_dir=%q\n' "$GUEST_RUNTIME_DIR"
@@ -571,6 +578,11 @@ df -h /var/tmp
 
 echo "Pulling $image_ref"
 podman pull "$image_ref"
+if ! podman run --rm --pull=never --entrypoint /usr/bin/test "$image_ref" \
+    -x "/usr/libexec/bootc-installer/$installer_name"; then
+    echo "Pulled image does not provide an executable installer for backend: $installer_name" >&2
+    exit 1
+fi
 mkdir -p "$runtime_dir"
 podman run --rm --pull=never --privileged \
     --user 0:0 \
@@ -830,6 +842,18 @@ validate_recovery_output() {
     ' "$RECOVERY_KEY_FILE" || die "recovery-key output is malformed: $RECOVERY_KEY_FILE"
 }
 
+validate_recovery_key_logs() {
+    local recovery_key serial_log
+    while IFS=' ' read -r _ recovery_key; do
+        for serial_log in "$INSTALL_SERIAL_LOG" "$BOOT_SERIAL_LOG"; do
+            [[ -f $serial_log ]] || continue
+            if grep -Fq -- "$recovery_key" "$serial_log"; then
+                die "credential leak detected in QEMU serial output"
+            fi
+        done
+    done <"$RECOVERY_KEY_FILE"
+}
+
 run_install() {
     local qemu_status
     stage_installer_config
@@ -853,6 +877,7 @@ run_install() {
     grep -q 'TEST_INSTALL_QEMU_BOOTC_RESULT=0' "$INSTALL_SERIAL_LOG" ||
         die "guest installer did not report success; see $INSTALL_SERIAL_LOG"
     validate_recovery_output
+    validate_recovery_key_logs
     log "Installation completed successfully"
     log "Recovery keys: $RECOVERY_KEY_FILE"
 }
