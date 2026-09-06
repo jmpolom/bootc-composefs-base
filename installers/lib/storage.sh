@@ -59,15 +59,50 @@ runtime_path_for_mount() {
     esac
 }
 
+# Validate the indexes of one of the per-extra-mount indexed arrays.  Required
+# arrays must be dense because all storage operations consume them by position;
+# optional arrays may omit an entry, but an entry must still belong to a real
+# extra-mount record.
+validate_extra_mount_array_indexes() {
+    local name=$1
+    local count=$2
+    local required=$3
+    local index
+    local -n values=$name
+
+    for index in "${!values[@]}"; do
+        [[ $index =~ ^[0-9]+$ ]] || die "$name has an invalid index: $index"
+        ((index < count)) || die "${name}[$index] is outside extra mount range 0..$((count - 1))"
+    done
+
+    if [[ $required == true ]]; then
+        ((${#values[@]} == count)) || die "$name must match extra_mount_devices length"
+        for ((index = 0; index < count; index++)); do
+            [[ -v "values[$index]" ]] || die "$name is missing required index: $index"
+        done
+    fi
+}
+
 # Arrays in this function are initialized dynamically by ensure_indexed_array.
 # shellcheck disable=SC2154
 validate_extra_mount_config() {
     local count=${#extra_mount_devices[@]}
-    ((${#extra_mount_points[@]} == count)) || die "extra_mount_points must match extra_mount_devices length"
-    ((${#extra_mount_filesystems[@]} == count)) || die "extra_mount_filesystems must match extra_mount_devices length"
+    local required_array optional_array
+    for required_array in extra_mount_devices extra_mount_points extra_mount_filesystems; do
+        validate_extra_mount_array_indexes "$required_array" "$count" true
+    done
+    for optional_array in extra_mount_encrypted extra_mount_labels extra_mount_options extra_mount_luks_names \
+        extra_mount_tpm2 extra_mount_tpm2_pcrs extra_mount_tpm2_recovery; do
+        validate_extra_mount_array_indexes "$optional_array" "$count" false
+    done
 
-    local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_runtime_paths=() seen_luks_names=([root]=1)
+    local root_luks_name=${luks_name:-root}
+    local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_runtime_paths=() seen_luks_names=()
     local index device device_real mount_point runtime_path filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery parent
+    seen_luks_names["$root_luks_name"]=1
+    if [[ $root_encrypted == true && -e /dev/mapper/$root_luks_name ]]; then
+        die "configured root LUKS mapping is already active: $root_luks_name"
+    fi
     for ((index = 0; index < count; index++)); do
         device=${extra_mount_devices[$index]}
         mount_point=${extra_mount_points[$index]}
@@ -139,6 +174,7 @@ validate_extra_mount_config() {
             [[ $luks_name =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "extra LUKS name must be lower case: $luks_name"
             ((${#luks_name} <= 127)) || die "extra LUKS mapping name is too long: $luks_name"
             [[ -z ${seen_luks_names[$luks_name]:-} ]] || die "extra LUKS mapping name is duplicated: $luks_name"
+            [[ ! -e /dev/mapper/$luks_name ]] || die "extra LUKS mapping is already active: $luks_name"
             seen_luks_names[$luks_name]=1
             luks_label=${label:0:43}_luks
             [[ -z ${seen_labels[$luks_label]:-} ]] || die "extra LUKS label is duplicated: $luks_label"
