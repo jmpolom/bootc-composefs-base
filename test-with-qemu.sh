@@ -712,7 +712,7 @@ base_qemu_args() {
         -monitor "unix:$MONITOR_SOCKET,server=on,wait=off"
     )
     if [[ $QEMU_ARCH == aarch64 ]]; then
-        QEMU_ARGS=(-machine 'virt,highmem=on' "${QEMU_ARGS[@]}" -device 'tpm-tis-device,tpmdev=tpm0')
+        QEMU_ARGS=(-machine 'virt,highmem=on' "${QEMU_ARGS[@]}" -device 'tpm-tis-device,tpmdev=tpm0,ppi=off')
     else
         QEMU_ARGS=(-machine q35 "${QEMU_ARGS[@]}" -device 'tpm-tis,tpmdev=tpm0')
     fi
