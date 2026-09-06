@@ -14,7 +14,14 @@ declare -ag extra_mount_luks_labels=()
 # operation sees the same shape whether a record came from a shortcut or was
 # written explicitly by the user.
 normalize_extra_mount_shortcuts() {
-    local shortcut value target subvolume index
+    local shortcut value target subvolume index insertion_index max_index array_name
+    local -n array_ref
+    local -a extra_mount_array_names=(
+        extra_mount_devices extra_mount_points extra_mount_filesystems
+        extra_mount_encrypted extra_mount_labels extra_mount_options
+        extra_mount_luks_names extra_mount_tpm2 extra_mount_tpm2_pcrs
+        extra_mount_tpm2_recovery
+    )
 
     for shortcut in separate_var separate_home separate_opt; do
         value=${!shortcut:-false}
@@ -41,7 +48,49 @@ normalize_extra_mount_shortcuts() {
                 die "$shortcut conflicts with an explicit extra mount at $target"
         done
 
-        index=${#extra_mount_devices[@]}
+        # Insert a generated parent immediately before the first explicit
+        # descendant.  Otherwise append after the highest defined index.  Use
+        # all arrays when finding the append position so malformed optional
+        # indexes cannot be overwritten and hidden by normalization.
+        max_index=-1
+        for array_name in "${extra_mount_array_names[@]}"; do
+            declare -n array_ref="$array_name"
+            for index in "${!array_ref[@]}"; do
+                if ((index > max_index)); then
+                    max_index=$index
+                fi
+            done
+        done
+        insertion_index=$((max_index + 1))
+        for index in "${!extra_mount_points[@]}"; do
+            if [[ ${extra_mount_points[$index]} == "$target"/* ]] &&
+                ((index < insertion_index)); then
+                insertion_index=$index
+            fi
+        done
+
+        # Shift every array independently so sparse holes remain holes.  An
+        # assignment through ${array[@]} would densify the arrays and could
+        # make a required missing index appear valid.
+        for array_name in "${extra_mount_array_names[@]}"; do
+            declare -n array_ref="$array_name"
+            local -a shifted=()
+            local old_index new_index
+            for old_index in "${!array_ref[@]}"; do
+                if ((old_index >= insertion_index)); then
+                    new_index=$((old_index + 1))
+                else
+                    new_index=$old_index
+                fi
+                shifted[new_index]=${array_ref[old_index]}
+            done
+            array_ref=()
+            for new_index in "${!shifted[@]}"; do
+                array_ref[new_index]=${shifted[new_index]}
+            done
+        done
+
+        index=$insertion_index
         extra_mount_devices[index]=/dev/disk/by-label/root
         extra_mount_points[index]=$target
         extra_mount_filesystems[index]=btrfs
@@ -52,7 +101,7 @@ normalize_extra_mount_shortcuts() {
         extra_mount_tpm2[index]=false
         extra_mount_tpm2_pcrs[index]=
         extra_mount_tpm2_recovery[index]=false
-        log "Normalized $shortcut shortcut to root-backed extra mount at $target"
+        log "Normalized $shortcut shortcut to root-backed extra mount at $target (index $index)"
     done
 
     # Do not leave shortcut state available to any downstream phase.  The

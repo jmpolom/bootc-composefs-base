@@ -38,8 +38,11 @@ The generated records also set `extra_mount_encrypted`, `extra_mount_tpm2`, and
 `/ostree/deploy/$stateroot/var` for OSTree, so for example composefs `separate_home` selects
 `subvol=root/state/os/default/var/home`, while OSTree selects
 `subvol=root/ostree/deploy/$stateroot/var/home`. Explicit records are retained and generated
-records are appended. An explicit record using the same literal target as a true switch is
-rejected; the same complete root-backed record written explicitly has identical behavior.
+records are inserted immediately before the first explicit descendant that needs the generated
+parent; otherwise the generated record is appended after the highest defined index. This keeps
+unrelated explicit records in their original relative order and preserves sparse array holes for
+validation. An explicit record using the same literal target as a true switch is rejected; the same
+complete root-backed record written explicitly has identical behavior.
 
 ## Architecture and lifecycle
 
@@ -237,6 +240,25 @@ interfaces; QEMU's user-mode network then provides outbound NAT, DHCP, and DNS w
 ./test-with-qemu.sh -i ghcr.io/example/os:tag
 ./test-with-qemu.sh -r boot
 ```
+
+The checked-in configurations exercise the encrypted root, TPM2 PCR 7 and recovery enrollment,
+ephemeral-key cleanup, a root-backed `/var`, an encrypted TPM2/recovery-protected Btrfs extra
+mount, and the administrative user on each backend. Use the composefs configuration with its
+literal `/var/opt` descendant:
+
+```bash
+./test-with-qemu.sh -r all -b composefs -C test-configs/qemu-default.env -i ghcr.io/example/os:tag
+```
+
+Use the OSTree configuration with its literal `/opt` extra mount:
+
+```bash
+./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-ostree.env -i ghcr.io/example/os:tag
+```
+
+The OSTree image's `/srv` is an image symlink to `/var/srv`, so `/opt` is used to exercise a
+literal extra target without replacing or traversing that symlink. Both commands require a
+backend-compatible CI-built image reference; the harness does not consume locally built images.
 
 Existing VM state is never replaced unless `-f` is supplied to an install mode. See
 `./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables.
