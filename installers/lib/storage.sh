@@ -232,7 +232,7 @@ validate_extra_mount_config() {
         fi
 
         [[ $mount_point == /* ]] || die "extra mount point must be absolute: $mount_point"
-        [[ $(realpath -m -- "$mount_point") == "$mount_point" ]] || die "extra mount point is not normalized: $mount_point"
+        is_normalized_absolute_path "$mount_point" || die "extra mount point is not normalized: $mount_point"
         case "$mount_point" in
             /usr/local | /usr/local/*) ;;
             / | /boot | /boot/* | /etc | /etc/* | /usr | /usr/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*)

@@ -129,6 +129,21 @@ is_canonical_guid() {
     [[ ${1:-} =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
 }
 
+# Validate a mount target's spelling without resolving filesystem symlinks.
+# Mount targets are interpreted in the installed tree later, where symlink and
+# file-type checks must inspect the requested literal path.  Keep this check
+# lexical and portable instead of using realpath, which follows live-image
+# aliases such as /srv -> /var/srv.
+is_normalized_absolute_path() {
+    local path=${1:-}
+    [[ $path == /* ]] || return 1
+    [[ $path == / || $path != */ ]] || return 1
+    [[ $path != *//* ]] || return 1
+    case "$path" in
+        */./* | */../* | */. | */..) return 1 ;;
+    esac
+}
+
 validate_canonical_guid() {
     local guid=$1 description=${2:-GUID}
     is_canonical_guid "$guid" ||
