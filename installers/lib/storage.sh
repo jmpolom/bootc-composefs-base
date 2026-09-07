@@ -374,54 +374,39 @@ capture_recovery_key() {
     local output_name=$1
     local device=$2
     shift 2
-    local trace_was_enabled=false
     local captured_output status
 
-    if xtrace_secret_start; then
-        trace_was_enabled=true
-    fi
     if captured_output=$(SYSTEMD_COLORS=0 systemd-cryptenroll "$@" --recovery-key "$device"); then
         status=0
     else
         status=$?
     fi
     printf -v "$output_name" '%s' "$captured_output"
-    xtrace_secret_restore "$trace_was_enabled"
     return "$status"
 }
 
 test_recovery_key() {
     local key_name=$1
     local device=$2
-    local trace_was_enabled=false
     local status
 
-    if xtrace_secret_start; then
-        trace_was_enabled=true
-    fi
     if printf '%s' "${!key_name}" | cryptsetup open --test-passphrase --key-file=- "$device"; then
         status=0
     else
         status=$?
     fi
-    xtrace_secret_restore "$trace_was_enabled"
     return "$status"
 }
 
 validate_recovery_key() {
     local key_name=$1
-    local trace_was_enabled=false
     local status
 
-    if xtrace_secret_start; then
-        trace_was_enabled=true
-    fi
     if [[ ${!key_name} =~ ^[bcdefghijklnrtuv]{8}(-[bcdefghijklnrtuv]{8}){7}$ ]]; then
         status=0
     else
         status=1
     fi
-    xtrace_secret_restore "$trace_was_enabled"
     return "$status"
 }
 
@@ -429,18 +414,13 @@ write_recovery_key_record() {
     local uuid_name=$1
     local key_name=$2
     local output_file=$3
-    local trace_was_enabled=false
     local status
 
-    if xtrace_secret_start; then
-        trace_was_enabled=true
-    fi
     if printf '%s %s\n' "${!uuid_name}" "${!key_name}" >>"$output_file"; then
         status=0
     else
         status=$?
     fi
-    xtrace_secret_restore "$trace_was_enabled"
     return "$status"
 }
 

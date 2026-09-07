@@ -67,10 +67,9 @@ validated callback names; backend policy and assets stay in the backend entrypoi
 state, and orchestration stay shared.
 
 Preflight validates configuration, paths, commands, assets, arrays, mapper names, mount options,
-and backend requirements before recovery output is initialized or any disk is erased. Secret
-operations temporarily disable Bash xtrace and restore its prior state, so recovery keys and
-password hashes are not exposed by `-t`. Cleanup attempts every reverse-order unmount and mapper
-close plus temporary-key removal, logs individual failures, preserves an original failure status,
+and backend requirements before recovery output is initialized or any disk is erased. Cleanup attempts
+every reverse-order unmount and mapper close plus temporary-key removal, logs individual failures,
+preserves an original failure status,
 and reports success only when cleanup succeeds. There are no forced/lazy unmounts, unspecified
 retries, rollback machinery, or general existing-filesystem lifecycle in scope. Additional
 whole-disk records are newly created storage; root-backed normalized records create/reuse only
@@ -87,8 +86,9 @@ sudo ./install-ostree.sh -c ./install.env -y
 sudo ./install-composefs.sh -c ./install.env -y
 ```
 
-Use `-t` for Bash `set -x`. `rust_log` is exported as `RUST_LOG` only for the bootc process; for
-example, `rust_log=bootc=debug` enables bootc debug logs.
+Use `-t` for Bash `set -x`. This is debugging output and can expose passwords, hashes, recovery
+keys, and other sensitive values. `rust_log` is exported as `RUST_LOG` only for the bootc process;
+for example, `rust_log=bootc=debug` enables bootc debug logs.
 
 Leave `source_imgref` empty when the installer runs inside the image that it should install. In that
 mode bootc discovers the running container through Podman, so invoke it from a rootful, privileged
@@ -261,7 +261,8 @@ literal extra target without replacing or traversing that symlink. Both commands
 backend-compatible CI-built image reference; the harness does not consume locally built images.
 
 Existing VM state is never replaced unless `-f` is supplied to an install mode. See
-`./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables.
+`./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables. The harness
+enables installer shell tracing by default; use `-q` or `INSTALLER_TRACE=false` for quieter output.
 
 ## Removing a backend
 

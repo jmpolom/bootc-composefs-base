@@ -23,6 +23,7 @@ SCRATCH_DISK_SIZE=${SCRATCH_DISK_SIZE:-10G}
 QEMU_MEMORY=${QEMU_MEMORY:-4G}
 QEMU_CPUS=${QEMU_CPUS:-4}
 FORCE=${FORCE:-false}
+INSTALLER_TRACE=${INSTALLER_TRACE:-true}
 
 QEMU_ACCEL=${QEMU_ACCEL:-}
 QEMU_DISPLAY=${QEMU_DISPLAY:-}
@@ -60,6 +61,7 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -d SIZE     Target NVMe qcow2 size.                        [TARGET_DISK_SIZE]
   -e SIZE     Extra NVMe qcow2 size.                         [EXTRA_DISK_SIZE]
   -t SIZE     Temporary-storage qcow2 size.                  [SCRATCH_DISK_SIZE]
+  -q          Disable installer shell tracing for quieter output. [INSTALLER_TRACE=false]
   -m MEMORY   Guest memory.                                  [QEMU_MEMORY]
   -c CPUS     Guest CPU count.                               [QEMU_CPUS]
   -f          Replace existing mutable VM state.             [FORCE=true]
@@ -87,7 +89,7 @@ log() {
 
 parse_options() {
     local option
-    while getopts ':a:r:i:C:w:s:I:b:P:k:d:e:t:m:c:fh' option; do
+    while getopts ':a:r:i:C:w:s:I:b:P:k:d:e:t:qm:c:fh' option; do
         case "$option" in
             a) QEMU_ARCH=$OPTARG ;;
             r) RUN_MODE=$OPTARG ;;
@@ -102,6 +104,7 @@ parse_options() {
             d) TARGET_DISK_SIZE=$OPTARG ;;
             e) EXTRA_DISK_SIZE=$OPTARG ;;
             t) SCRATCH_DISK_SIZE=$OPTARG ;;
+            q) INSTALLER_TRACE=false ;;
             m) QEMU_MEMORY=$OPTARG ;;
             c) QEMU_CPUS=$OPTARG ;;
             f) FORCE=true ;;
@@ -173,6 +176,7 @@ validate_configuration() {
     case "$RUN_MODE" in install | boot | all) ;; *) die "invalid run mode: $RUN_MODE" ;; esac
     case "$FCOS_STREAM" in stable | testing | next) ;; *) die "invalid Fedora CoreOS stream: $FCOS_STREAM" ;; esac
     validate_backend_identifier
+    case "$INSTALLER_TRACE" in true | false) ;; *) die "INSTALLER_TRACE must be true or false" ;; esac
     [[ $QEMU_CPUS =~ ^[1-9][0-9]*$ ]] || die "guest CPU count must be a positive integer"
     [[ $BOOT_MENU_DELAY_SECS =~ ^[0-9]+$ ]] || die "BOOT_MENU_DELAY_SECS must be a non-negative integer"
     [[ $GRUB_KERNEL_LINE_DOWNS =~ ^[0-9]+$ ]] || die "GRUB_KERNEL_LINE_DOWNS must be a non-negative integer"
@@ -481,10 +485,15 @@ create_live_wrapper() {
         printf 'target_device=%q\n' "$GUEST_TARGET_DISK"
         printf 'extra_device=%q\n' "$GUEST_EXTRA_DISK"
         printf 'scratch_device=%q\n' /dev/disk/by-id/virtio-bootc-scratch
+        printf 'installer_trace=%q\n' "$INSTALLER_TRACE"
         cat <<'EOF'
 set -Eeuo pipefail
 umask 077
 scratch_mounted=false
+installer_args=(-c "$install_config" -y)
+if [[ $installer_trace == true ]]; then
+    installer_args+=(-t)
+fi
 
 require_full_capabilities() {
     [[ $EUID -eq 0 ]] || {
@@ -599,7 +608,7 @@ podman run --rm --pull=never --privileged \
     --volume "$runtime_dir:$runtime_dir" \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
     "$image_ref" \
-    -c "$install_config" -y -t
+    "${installer_args[@]}"
 [[ $(wc -l <"$recovery_file") -eq 2 ]] || {
     echo "Expected two recovery-key records" >&2
     exit 1
@@ -842,18 +851,6 @@ validate_recovery_output() {
     ' "$RECOVERY_KEY_FILE" || die "recovery-key output is malformed: $RECOVERY_KEY_FILE"
 }
 
-validate_recovery_key_logs() {
-    local recovery_key serial_log
-    while IFS=' ' read -r _ recovery_key; do
-        for serial_log in "$INSTALL_SERIAL_LOG" "$BOOT_SERIAL_LOG"; do
-            [[ -f $serial_log ]] || continue
-            if grep -Fq -- "$recovery_key" "$serial_log"; then
-                die "credential leak detected in QEMU serial output"
-            fi
-        done
-    done <"$RECOVERY_KEY_FILE"
-}
-
 run_install() {
     local qemu_status
     stage_installer_config
@@ -877,7 +874,6 @@ run_install() {
     grep -q 'TEST_INSTALL_QEMU_BOOTC_RESULT=0' "$INSTALL_SERIAL_LOG" ||
         die "guest installer did not report success; see $INSTALL_SERIAL_LOG"
     validate_recovery_output
-    validate_recovery_key_logs
     log "Installation completed successfully"
     log "Recovery keys: $RECOVERY_KEY_FILE"
 }
