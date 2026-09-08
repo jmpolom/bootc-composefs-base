@@ -242,23 +242,22 @@ interfaces; QEMU's user-mode network then provides outbound NAT, DHCP, and DNS w
 ```
 
 The checked-in configurations exercise the encrypted root, TPM2 PCR 7 and recovery enrollment,
-ephemeral-key cleanup, a root-backed `/var`, an encrypted TPM2/recovery-protected Btrfs extra
-mount, and the administrative user on each backend. Use the composefs configuration with its
-literal `/var/opt` descendant:
+ephemeral-key cleanup, an encrypted TPM2/recovery-protected Btrfs filesystem mounted at `/var`,
+and the administrative user on each backend. All `separate_*` shortcuts are disabled pending
+clearer lifecycle and filesystem semantics. Use the composefs configuration with:
 
 ```bash
 ./test-with-qemu.sh -r all -b composefs -C test-configs/qemu-default.env -i ghcr.io/example/os:tag
 ```
 
-Use the OSTree configuration with its literal `/opt` extra mount:
+Use the OSTree configuration with:
 
 ```bash
 ./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-ostree.env -i ghcr.io/example/os:tag
 ```
 
-The OSTree image's `/srv` is an image symlink to `/var/srv`, so `/opt` is used to exercise a
-literal extra target without replacing or traversing that symlink. Both commands require a
-backend-compatible CI-built image reference; the harness does not consume locally built images.
+Both commands require a backend-compatible CI-built image reference; the harness does not consume
+locally built images.
 
 Existing VM state is never replaced unless `-f` is supplied to an install mode. See
 `./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables. The harness
