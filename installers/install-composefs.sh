@@ -62,7 +62,7 @@ composefs_validate_mount_target() {
     local mount_point=$1
     case "$mount_point" in
         /composefs | /composefs/* | /state | /state/*)
-            die "extra mount point is not a supported stateful path: $mount_point"
+            die "external volume mountpoint is not a supported stateful path: $mount_point"
             ;;
     esac
 }
@@ -82,10 +82,10 @@ composefs_build_bootc_args() {
 }
 
 composefs_append_external_var_karg() {
-    local label=$1
+    local source=$1
     local filesystem=$2
     local options=$3
-    bootc_args+=("--karg=rd.systemd.mount-extra=/dev/disk/by-label/${label}:/sysroot${physical_var_path}:${filesystem}:${options},x-systemd.before=${root_setup_unit}")
+    bootc_args+=("--karg=rd.systemd.mount-extra=${source}:/sysroot${physical_var_path}:${filesystem}:${options},x-systemd.before=${root_setup_unit}")
 }
 
 composefs_locate_deployment() {

@@ -93,16 +93,15 @@ set_defaults() {
     target_imgref=${target_imgref:-}
 
     ensure_indexed_array extra_kargs
-    ensure_indexed_array extra_mount_devices
-    ensure_indexed_array extra_mount_points
-    ensure_indexed_array extra_mount_filesystems
-    ensure_indexed_array extra_mount_encrypted
-    ensure_indexed_array extra_mount_labels
-    ensure_indexed_array extra_mount_options
-    ensure_indexed_array extra_mount_luks_names
-    ensure_indexed_array extra_mount_tpm2
-    ensure_indexed_array extra_mount_tpm2_pcrs
-    ensure_indexed_array extra_mount_tpm2_recovery
+    ensure_indexed_array ext_vol_devices
+    ensure_indexed_array ext_vol_mountpoint
+    ensure_indexed_array ext_vol_fs
+    ensure_indexed_array ext_vol_luks
+    ensure_indexed_array ext_vol_opts
+    ensure_indexed_array ext_vol_tpm
+    ensure_indexed_array ext_vol_tpm_pcrs
+    ensure_indexed_array ext_vol_recovery
+    ensure_indexed_array ext_vol_existing
 }
 
 ensure_indexed_array() {
@@ -335,17 +334,18 @@ validate_common_config() {
     require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
         dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sync udevadm umount \
         touch useradd usermod wipefs
-    validate_extra_mount_config
+    validate_ext_vol_config
 
     local recovery_requested=$root_tpm2_recovery
     local index
-    for ((index = 0; index < ${#extra_mount_devices[@]}; index++)); do
-        if [[ ${extra_mount_tpm2_recovery[$index]:-false} == true ]]; then
+    for ((index = 0; index < ${#ext_vol_devices[@]}; index++)); do
+        if [[ ${ext_vol_recovery[$index]:-false} == true ]]; then
             recovery_requested=true
         fi
-        if [[ $luks_ephemeral_key == true && ${extra_mount_encrypted[$index]:-false} == true && \
-              ${extra_mount_tpm2_recovery[$index]:-false} != true ]]; then
-            die "luks_ephemeral_key requires a recovery key for encrypted extra mount: ${extra_mount_points[$index]}"
+        if [[ $luks_ephemeral_key == true && ${ext_vol_existing[$index]:-false} == false && \
+              -n ${ext_vol_luks[$index]:-} && \
+              ${ext_vol_recovery[$index]:-false} != true ]]; then
+            die "luks_ephemeral_key requires a recovery key for encrypted external volume: ${ext_vol_mountpoint[$index]}"
         fi
     done
     if [[ $luks_ephemeral_key == true && $root_encrypted == true && $root_tpm2_recovery != true ]]; then
@@ -392,23 +392,24 @@ append_common_kargs() {
         [[ -n $karg ]] && bootc_args+=("--karg=$karg")
     done
 
-    local index label filesystem options mount_point uuid luks_name luks_options
-    for ((index = 0; index < ${#extra_mount_devices[@]}; index++)); do
-        label=${extra_mount_labels_resolved[$index]}
-        filesystem=${extra_mount_filesystems[$index]}
-        options=${extra_mount_options[$index]:-defaults}
-        mount_point=${extra_mount_points[$index]}
+    local index source filesystem options mount_point uuid luks_name luks_options
+    for ((index = 0; index < ${#ext_vol_devices[@]}; index++)); do
+        source=${ext_vol_sources_resolved[$index]:-}
+        filesystem=${ext_vol_fs[$index]}
+        options=${ext_vol_opts[$index]:-defaults}
+        mount_point=${ext_vol_mountpoint[$index]}
+        [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
         if [[ $mount_point == /var ]]; then
-            append_external_var_karg "$label" "$filesystem" "$options"
+            append_external_var_karg "$source" "$filesystem" "$options"
         else
-            bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:${mount_point}:${filesystem}:${options}")
+            bootc_args+=("--karg=systemd.mount-extra=${source}:${mount_point}:${filesystem}:${options}")
         fi
 
-        uuid=${extra_mount_luks_uuids[$index]:-}
+        uuid=${ext_vol_luks_uuids[$index]:-}
         if [[ -n $uuid ]]; then
-            luks_name=${extra_mount_luks_names[$index]:-${label}_crypt}
+            luks_name=${ext_vol_luks[$index]}
             luks_options=x-initrd.attach
-            if [[ ${extra_mount_tpm2[$index]:-false} == true ]]; then
+            if [[ ${ext_vol_tpm[$index]:-false} == true ]]; then
                 luks_options='tpm2-device=auto,x-initrd.attach'
             fi
             bootc_args+=(
@@ -475,6 +476,18 @@ cleanup() {
         fi
     done
 
+    for key_file in "${temporary_credential_files[@]}"; do
+        if [[ -n $key_file ]] && ! rm -f -- "$key_file"; then
+            printf 'Cleanup failed to remove temporary credential %s\n' "$key_file" >&2
+            cleanup_status=1
+        fi
+    done
+
+    local credential_variable
+    for credential_variable in "${external_credential_variables[@]}"; do
+        [[ -n $credential_variable ]] && unset "$credential_variable"
+    done
+
     if [[ $status -eq 0 && $cleanup_status -ne 0 ]]; then
         status=$cleanup_status
     fi
@@ -499,7 +512,7 @@ run_installer() {
     parse_options "$@"
     set_defaults
     backend_callback set_defaults
-    normalize_extra_mount_shortcuts
+    normalize_ext_vol_shortcuts
     validate_common_config
     backend_callback preflight
 
@@ -513,8 +526,8 @@ run_installer() {
     persistent_var="$install_root$physical_var_path"
     backend_callback locate_deployment
     backend_callback postprocess
-    prepare_extra_mount_targets "$config_root" "$persistent_var"
-    configure_extra_mounts "$config_root" "$persistent_var"
+    prepare_ext_vol_targets "$config_root" "$persistent_var"
+    configure_ext_vols "$config_root" "$persistent_var"
     configure_first_user "$config_root" "$persistent_var"
     relabel_target_paths "$config_root"
     finish_installation

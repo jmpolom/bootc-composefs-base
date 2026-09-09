@@ -4,23 +4,25 @@
 declare -ag cleanup_mounts=()
 declare -ag opened_luks_names=()
 declare -ag temporary_luks_key_files=()
-declare -ag extra_mount_labels_resolved=()
-declare -ag extra_mount_luks_uuids=()
-declare -ag extra_mount_luks_labels=()
+declare -ag temporary_credential_files=()
+declare -ag external_credential_variables=()
+declare -ag ext_vol_labels_resolved=()
+declare -ag ext_vol_sources_resolved=()
+declare -ag ext_vol_luks_uuids=()
+declare -ag ext_vol_luks_labels=()
 
-# Convert the legacy state-subvolume switches into ordinary root-backed extra
-# mount records before any indexed-array or mount-target validation runs.  The
+# Convert the legacy state-subvolume switches into ordinary root-backed external volume
+# records before any indexed-array or mount-target validation runs.  The
 # generated records deliberately carry no provenance: every later storage
 # operation sees the same shape whether a record came from a shortcut or was
 # written explicitly by the user.
-normalize_extra_mount_shortcuts() {
+normalize_ext_vol_shortcuts() {
     local shortcut value target subvolume index insertion_index max_index array_name
     local -n array_ref
-    local -a extra_mount_array_names=(
-        extra_mount_devices extra_mount_points extra_mount_filesystems
-        extra_mount_encrypted extra_mount_labels extra_mount_options
-        extra_mount_luks_names extra_mount_tpm2 extra_mount_tpm2_pcrs
-        extra_mount_tpm2_recovery
+    local -a ext_vol_array_names=(
+        ext_vol_devices ext_vol_mountpoint ext_vol_fs
+        ext_vol_luks ext_vol_opts ext_vol_tpm ext_vol_tpm_pcrs
+        ext_vol_recovery ext_vol_existing
     )
 
     for shortcut in separate_var separate_home separate_opt; do
@@ -43,9 +45,9 @@ normalize_extra_mount_shortcuts() {
                 ;;
         esac
 
-        for index in "${!extra_mount_points[@]}"; do
-            [[ ${extra_mount_points[$index]} != "$target" ]] ||
-                die "$shortcut conflicts with an explicit extra mount at $target"
+        for index in "${!ext_vol_mountpoint[@]}"; do
+            [[ ${ext_vol_mountpoint[$index]} != "$target" ]] ||
+                die "$shortcut conflicts with an explicit external volume at $target"
         done
 
         # Insert a generated parent immediately before the first explicit
@@ -53,7 +55,7 @@ normalize_extra_mount_shortcuts() {
         # all arrays when finding the append position so malformed optional
         # indexes cannot be overwritten and hidden by normalization.
         max_index=-1
-        for array_name in "${extra_mount_array_names[@]}"; do
+        for array_name in "${ext_vol_array_names[@]}"; do
             declare -n array_ref="$array_name"
             for index in "${!array_ref[@]}"; do
                 if ((index > max_index)); then
@@ -62,8 +64,8 @@ normalize_extra_mount_shortcuts() {
             done
         done
         insertion_index=$((max_index + 1))
-        for index in "${!extra_mount_points[@]}"; do
-            if [[ ${extra_mount_points[$index]} == "$target"/* ]] &&
+        for index in "${!ext_vol_mountpoint[@]}"; do
+            if [[ ${ext_vol_mountpoint[$index]} == "$target"/* ]] &&
                 ((index < insertion_index)); then
                 insertion_index=$index
             fi
@@ -72,7 +74,7 @@ normalize_extra_mount_shortcuts() {
         # Shift every array independently so sparse holes remain holes.  An
         # assignment through ${array[@]} would densify the arrays and could
         # make a required missing index appear valid.
-        for array_name in "${extra_mount_array_names[@]}"; do
+        for array_name in "${ext_vol_array_names[@]}"; do
             declare -n array_ref="$array_name"
             local -a shifted=()
             local old_index new_index
@@ -91,17 +93,16 @@ normalize_extra_mount_shortcuts() {
         done
 
         index=$insertion_index
-        extra_mount_devices[index]=/dev/disk/by-label/root
-        extra_mount_points[index]=$target
-        extra_mount_filesystems[index]=btrfs
-        extra_mount_encrypted[index]=false
-        extra_mount_labels[index]=root
-        extra_mount_options[index]="subvol=$subvolume,$state_mount_options"
-        extra_mount_luks_names[index]=
-        extra_mount_tpm2[index]=false
-        extra_mount_tpm2_pcrs[index]=
-        extra_mount_tpm2_recovery[index]=false
-        log "Normalized $shortcut shortcut to root-backed extra mount at $target (index $index)"
+        ext_vol_devices[index]=/dev/disk/by-label/root
+        ext_vol_mountpoint[index]=$target
+        ext_vol_fs[index]=btrfs
+        ext_vol_opts[index]="subvol=$subvolume,$state_mount_options"
+        ext_vol_luks[index]=
+        ext_vol_tpm[index]=false
+        ext_vol_tpm_pcrs[index]=
+        ext_vol_recovery[index]=false
+        ext_vol_existing[index]=false
+        log "Normalized $shortcut shortcut to root-backed external volume at $target (index $index)"
     done
 
     # Do not leave shortcut state available to any downstream phase.  The
@@ -109,29 +110,28 @@ normalize_extra_mount_shortcuts() {
     unset separate_var separate_home separate_opt
 }
 
-# A root-backed record is the narrow exception to the ordinary extra-mount
+# A root-backed record is the narrow exception to the ordinary external volume
 # contract: it selects a Btrfs subvolume in the root filesystem rather than
 # describing a new whole-disk filesystem.  Keep this classifier based only on
 # the normalized record shape.  In particular, do not resolve the future
 # /dev/disk/by-label/root path while validating it as an independent device.
-root_backed_extra_mount_subvolume() {
+root_backed_ext_vol_subvolume() {
     local index=$1
-    local device=${extra_mount_devices[$index]:-}
-    local filesystem=${extra_mount_filesystems[$index]:-}
-    local encrypted=${extra_mount_encrypted[$index]:-false}
-    local label=${extra_mount_labels[$index]:-}
-    local options=${extra_mount_options[$index]:-}
-    local luks_name=${extra_mount_luks_names[$index]:-}
-    local tpm2=${extra_mount_tpm2[$index]:-false}
-    local tpm2_pcrs=${extra_mount_tpm2_pcrs[$index]:-}
-    local tpm2_recovery=${extra_mount_tpm2_recovery[$index]:-false}
+    local device=${ext_vol_devices[$index]:-}
+    local filesystem=${ext_vol_fs[$index]:-}
+    local options=${ext_vol_opts[$index]:-}
+    local luks_name=${ext_vol_luks[$index]:-}
+    local tpm2=${ext_vol_tpm[$index]:-false}
+    local tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
+    local tpm2_recovery=${ext_vol_recovery[$index]:-false}
+    local existing=${ext_vol_existing[$index]:-false}
     local expected_prefix="root${physical_var_path:-}"
     local subvolume=
     local option_token
     local -a root_backed_option_tokens=()
 
-    [[ $device == /dev/disk/by-label/root && $label == root && $filesystem == btrfs ]] || return 1
-    [[ $encrypted == false && -z $luks_name && $tpm2 == false && -z $tpm2_pcrs &&
+    [[ $device == /dev/disk/by-label/root && $filesystem == btrfs && $existing == false ]] || return 1
+    [[ -z $luks_name && $tpm2 == false && -z $tpm2_pcrs &&
         $tpm2_recovery == false ]] || return 1
 
     IFS=, read -r -a root_backed_option_tokens <<< "$options"
@@ -146,8 +146,8 @@ root_backed_extra_mount_subvolume() {
     printf '%s\n' "$subvolume"
 }
 
-is_root_backed_extra_mount() {
-    root_backed_extra_mount_subvolume "$1" >/dev/null
+is_root_backed_ext_vol() {
+    root_backed_ext_vol_subvolume "$1" >/dev/null
 }
 
 label_for_mount() {
@@ -175,8 +175,14 @@ filesystem_label_limit() {
         xfs) printf '%s\n' 12 ;;
         ext4) printf '%s\n' 16 ;;
         btrfs) printf '%s\n' 255 ;;
-        *) die "unsupported extra filesystem: $1" ;;
+        *) die "unsupported external filesystem: $1" ;;
     esac
+}
+
+device_is_descendant_of() {
+    local device=$1
+    local ancestor=$2
+    lsblk -nrpo NAME "$ancestor" | awk -v device="$device" '$1 == device { found=1 } END { exit !found }'
 }
 
 # Reject mount options that would make installer-created filesystems read-only
@@ -204,11 +210,11 @@ validate_created_mount_options() {
     done
 }
 
-# Validate the indexes of one of the per-extra-mount indexed arrays.  Required
+# Validate the indexes of one of the per external volume indexed arrays. Required
 # arrays must be dense because all storage operations consume them by position;
 # optional arrays may omit an entry, but an entry must still belong to a real
-# extra-mount record.
-validate_extra_mount_array_indexes() {
+# external volume record.
+validate_ext_vol_array_indexes() {
     local name=$1
     local count=$2
     local required=$3
@@ -217,11 +223,11 @@ validate_extra_mount_array_indexes() {
 
     for index in "${!values[@]}"; do
         [[ $index =~ ^[0-9]+$ ]] || die "$name has an invalid index: $index"
-        ((index < count)) || die "${name}[$index] is outside extra mount range 0..$((count - 1))"
+        ((index < count)) || die "${name}[$index] is outside external volume range 0..$((count - 1))"
     done
 
     if [[ $required == true ]]; then
-        ((${#values[@]} == count)) || die "$name must match extra_mount_devices length"
+        ((${#values[@]} == count)) || die "$name must match ext_vol_devices length"
         for ((index = 0; index < count; index++)); do
             [[ -v "values[$index]" ]] || die "$name is missing required index: $index"
         done
@@ -230,131 +236,179 @@ validate_extra_mount_array_indexes() {
 
 # Arrays in this function are initialized dynamically by ensure_indexed_array.
 # shellcheck disable=SC2154
-validate_extra_mount_config() {
-    local count=${#extra_mount_devices[@]}
+validate_ext_vol_config() {
+    local count=${#ext_vol_devices[@]}
     local required_array optional_array
-    for required_array in extra_mount_devices extra_mount_points extra_mount_filesystems; do
-        validate_extra_mount_array_indexes "$required_array" "$count" true
+    for required_array in ext_vol_devices ext_vol_mountpoint ext_vol_fs; do
+        validate_ext_vol_array_indexes "$required_array" "$count" true
     done
-    for optional_array in extra_mount_encrypted extra_mount_labels extra_mount_options extra_mount_luks_names \
-        extra_mount_tpm2 extra_mount_tpm2_pcrs extra_mount_tpm2_recovery; do
-        validate_extra_mount_array_indexes "$optional_array" "$count" false
+    for optional_array in ext_vol_luks ext_vol_opts ext_vol_tpm ext_vol_tpm_pcrs \
+        ext_vol_recovery ext_vol_existing; do
+        validate_ext_vol_array_indexes "$optional_array" "$count" false
     done
 
     local root_luks_name=${luks_name:-root}
     local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_luks_names=()
-    local index device device_real mount_point filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery parent
+    local index device device_real mount_point filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery existing parent device_type credential_variable
     local root_backed root_subvolume root_option_token
     local -a root_option_tokens=()
     seen_luks_names["$root_luks_name"]=1
     if [[ $root_encrypted == true && -e /dev/mapper/$root_luks_name ]]; then
         die "configured root LUKS mapping is already active: $root_luks_name"
     fi
+    ext_vol_labels_resolved=()
+    ext_vol_sources_resolved=()
+    ext_vol_luks_uuids=()
+    ext_vol_luks_labels=()
     for ((index = 0; index < count; index++)); do
-        device=${extra_mount_devices[$index]}
-        mount_point=${extra_mount_points[$index]}
-        filesystem=${extra_mount_filesystems[$index]}
-        encrypted=${extra_mount_encrypted[$index]:-false}
-        tpm2=${extra_mount_tpm2[$index]:-false}
-        tpm2_pcrs=${extra_mount_tpm2_pcrs[$index]:-}
-        tpm2_recovery=${extra_mount_tpm2_recovery[$index]:-false}
-        options=${extra_mount_options[$index]:-defaults}
+        device=${ext_vol_devices[$index]}
+        mount_point=${ext_vol_mountpoint[$index]}
+        filesystem=${ext_vol_fs[$index]}
+        luks_name=${ext_vol_luks[$index]:-}
+        encrypted=false
+        [[ -n $luks_name ]] && encrypted=true
+        tpm2=${ext_vol_tpm[$index]:-false}
+        tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
+        tpm2_recovery=${ext_vol_recovery[$index]:-false}
+        existing=${ext_vol_existing[$index]:-false}
+        options=${ext_vol_opts[$index]:-defaults}
 
         root_backed=false
-        if root_subvolume=$(root_backed_extra_mount_subvolume "$index"); then
+        if root_subvolume=$(root_backed_ext_vol_subvolume "$index"); then
             root_backed=true
         fi
 
-        [[ $device == /dev/* ]] || die "extra_mount_devices[$index] must be a /dev node path"
+        [[ $device == /dev/* ]] || die "ext_vol_devices[$index] must be a /dev node path"
         if [[ $root_backed == false ]]; then
             device_real=$(readlink -f -- "$device")
-            [[ -b $device_real ]] || die "extra mount device is not a block device: $device"
-            [[ $(lsblk -ndo TYPE "$device_real") == disk ]] || die "extra mount device must be a whole disk: $device"
-            [[ $device_real != "$target_disk_real" ]] || die "extra mount device reuses target_disk: $device"
-            [[ -z ${seen_devices[$device_real]:-} ]] || die "extra mount device is listed more than once: $device"
+            [[ -b $device_real ]] || die "external volume device is not a block device: $device"
+            device_type=$(lsblk -ndo TYPE "$device_real")
+            if [[ $existing == false ]]; then
+                [[ $device_type == disk ]] || die "external volume device must be a whole disk: $device"
+            else
+                case "$device_type" in
+                    disk | part | lvm | crypt | dm) ;;
+                    *) die "existing external volume device must be a disk, partition, LV, or mapper: $device" ;;
+                esac
+            fi
+            if [[ $device_real == "$target_disk_real" ]] || device_is_descendant_of "$device_real" "$target_disk_real"; then
+                die "external volume device reuses target_disk: $device"
+            fi
+            [[ -z ${seen_devices[$device_real]:-} ]] || die "external volume device is listed more than once: $device"
             seen_devices[$device_real]=1
 
             parent=$(lsblk -nrpo MOUNTPOINTS "$device_real" | awk 'NF { print; exit }')
-            [[ -z $parent ]] || die "extra mount disk has a mounted filesystem at $parent"
+            [[ -z $parent ]] || die "external volume disk has a mounted filesystem at $parent"
             parent=$(lsblk -nrpo TYPE "$device_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
-            [[ -z $parent ]] || die "extra mount disk has an active mapped descendant of type $parent"
+            if [[ $existing == false ]]; then
+                [[ -z $parent ]] || die "external volume disk has an active mapped descendant of type $parent"
+            else
+                [[ $device_type != crypt && $device_type != dm ]] || [[ -z $luks_name ]] ||
+                    die "existing encrypted external volume must use its underlying block device: $device"
+                parent=$(lsblk -nrpo TYPE "$device_real" | awk 'NR > 1 && $1 ~ /^(crypt|lvm|raid)/ { print; exit }')
+                [[ -z $parent ]] ||
+                    die "existing external volume has an active mapped descendant of type $parent"
+            fi
         fi
 
-        [[ $mount_point == /* ]] || die "extra mount point must be absolute: $mount_point"
-        is_normalized_absolute_path "$mount_point" || die "extra mount point is not normalized: $mount_point"
+        [[ $mount_point == /* ]] || die "external volume mountpoint must be absolute: $mount_point"
+        is_normalized_absolute_path "$mount_point" || die "external volume mountpoint is not normalized: $mount_point"
+        if [[ $existing == true ]]; then
+            [[ $device != *:* && $device != *$'\n'* ]] ||
+                die "existing external volume device cannot contain ':' or a newline: $device"
+        fi
         case "$mount_point" in
             /usr/local | /usr/local/*) ;;
-            / | /boot | /boot/* | /etc | /etc/* | /usr | /usr/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*)
-                die "extra mount point is not a supported stateful path: $mount_point"
+            / | /boot | /boot/* | /etc | /etc/* | /usr | /usr/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/* | /sysroot | /sysroot/*)
+                die "external volume mountpoint is not a supported stateful path: $mount_point"
                 ;;
         esac
         validate_backend_mount_target "$mount_point"
-        [[ -z ${seen_paths[$mount_point]:-} ]] || die "extra mount point is listed more than once: $mount_point"
+        [[ -z ${seen_paths[$mount_point]:-} ]] || die "external volume mountpoint is listed more than once: $mount_point"
         seen_paths[$mount_point]=1
 
-        case "$filesystem" in
-            btrfs) require_commands mkfs.btrfs ;;
-            ext4) require_commands mkfs.ext4 ;;
-            xfs) require_commands mkfs.xfs ;;
-            *) die "extra_mount_filesystems[$index] must be btrfs, ext4, or xfs" ;;
-        esac
+        if [[ $existing == false ]]; then
+            case "$filesystem" in
+                btrfs) require_commands mkfs.btrfs ;;
+                ext4) require_commands mkfs.ext4 ;;
+                xfs) require_commands mkfs.xfs ;;
+                *) die "ext_vol_fs[$index] must be btrfs, ext4, or xfs" ;;
+            esac
+        else
+            [[ -n $filesystem ]] || die "ext_vol_fs[$index] must not be empty for an existing volume"
+        fi
+        [[ $filesystem != *:* && $filesystem != *$'\n'* ]] ||
+            die "ext_vol_fs[$index] cannot contain ':' or a newline"
         if [[ $root_backed == true ]]; then
             IFS=, read -r -a root_option_tokens <<< "$options"
             for root_option_token in "${root_option_tokens[@]}"; do
                 [[ $root_option_token != ro && $root_option_token != subvolid=* ]] ||
-                    die "extra mount options for $mount_point cannot contain installer-incompatible option: $root_option_token"
+                    die "external volume options for $mount_point cannot contain installer-incompatible option: $root_option_token"
             done
-        else
-            validate_created_mount_options "$options" "$filesystem" "extra mount options for $mount_point"
+        elif [[ $existing == false ]]; then
+            validate_created_mount_options "$options" "$filesystem" "external volume options for $mount_point"
         fi
-        [[ $options != *:* ]] || die "extra mount options cannot contain ':': $mount_point"
-        is_boolean "$encrypted" || die "extra_mount_encrypted[$index] must be true or false"
-        is_boolean "$tpm2" || die "extra_mount_tpm2[$index] must be true or false"
-        is_boolean "$tpm2_recovery" || die "extra_mount_tpm2_recovery[$index] must be true or false"
-        [[ $tpm2_pcrs != *$'\n'* ]] || die "extra_mount_tpm2_pcrs[$index] cannot contain a newline"
+        [[ $options != *:* ]] || die "external volume options cannot contain ':': $mount_point"
+        is_boolean "$tpm2" || die "ext_vol_tpm[$index] must be true or false"
+        is_boolean "$tpm2_recovery" || die "ext_vol_recovery[$index] must be true or false"
+        is_boolean "$existing" || die "ext_vol_existing[$index] must be true or false"
+        ext_vol_existing[index]=$existing
+        [[ $tpm2_pcrs != *$'\n'* ]] || die "ext_vol_tpm_pcrs[$index] cannot contain a newline"
         if [[ $tpm2 == true ]]; then
-            [[ $encrypted == true ]] || die "TPM enrollment requires encryption for extra mount: $mount_point"
+            [[ $encrypted == true ]] || die "TPM enrollment requires encryption for external volume: $mount_point"
             tpm_enrollment_requested=true
         elif [[ $tpm2_recovery == true ]]; then
-            die "TPM recovery enrollment requires extra_mount_tpm2[$index]=true: $mount_point"
+            die "TPM recovery enrollment requires ext_vol_tpm[$index]=true: $mount_point"
         elif [[ -n $tpm2_pcrs ]]; then
-            die "extra_mount_tpm2_pcrs[$index] requires extra_mount_tpm2[$index]=true"
+            die "ext_vol_tpm_pcrs[$index] requires ext_vol_tpm[$index]=true"
         fi
 
-        label=${extra_mount_labels[$index]:-$(label_for_mount "$mount_point" "$filesystem")}
-        [[ $label =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "extra mount label must be lower case: $label"
-        label_limit=$(filesystem_label_limit "$filesystem")
-        ((${#label} <= label_limit)) || die "$filesystem label is too long for $mount_point: $label"
         if [[ $root_backed == true ]]; then
-            [[ $label == root ]] || die "root-backed extra mount must use label root: $mount_point"
+            label=root
+        elif [[ $existing == false ]]; then
+            label=$(label_for_mount "$mount_point" "$filesystem")
         else
-            [[ -z ${seen_labels[$label]:-} ]] || die "extra mount label is duplicated: $label"
-            seen_labels[$label]=1
-            assert_label_available "/dev/disk/by-label/$label" "$device_real"
+            ext_vol_sources_resolved[index]=$device
+        fi
+        if [[ $existing == false ]]; then
+            [[ $label =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "external volume label must be lower case: $label"
+            label_limit=$(filesystem_label_limit "$filesystem")
+            ((${#label} <= label_limit)) || die "$filesystem label is too long for $mount_point: $label"
+            if [[ $root_backed == true ]]; then
+                [[ $label == root ]] || die "root-backed external volume must use label root: $mount_point"
+            else
+                [[ -z ${seen_labels[$label]:-} ]] || die "external volume label is duplicated: $label"
+                seen_labels[$label]=1
+                assert_label_available "/dev/disk/by-label/$label" "$device_real"
+            fi
+            ext_vol_labels_resolved[index]=$label
+            ext_vol_sources_resolved[index]=/dev/disk/by-label/$label
         fi
 
-        luks_name=${extra_mount_luks_names[$index]:-${label}_crypt}
         if [[ $encrypted == true ]]; then
-            [[ $luks_name =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "extra LUKS name must be lower case: $luks_name"
-            ((${#luks_name} <= 127)) || die "extra LUKS mapping name is too long: $luks_name"
-            [[ -z ${seen_luks_names[$luks_name]:-} ]] || die "extra LUKS mapping name is duplicated: $luks_name"
-            [[ ! -e /dev/mapper/$luks_name ]] || die "extra LUKS mapping is already active: $luks_name"
+            [[ $luks_name =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "ext_vol_luks[$index] must be lower case: $luks_name"
+            credential_variable=lvc_$luks_name
+            [[ $credential_variable =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] ||
+                die "ext_vol_luks[$index] does not produce a valid credential variable: $luks_name"
+            ((${#luks_name} <= 127)) || die "external volume LUKS mapping name is too long: $luks_name"
+            [[ -z ${seen_luks_names[$luks_name]:-} ]] || die "external volume LUKS mapping name is duplicated: $luks_name"
+            [[ ! -e /dev/mapper/$luks_name ]] || die "external volume LUKS mapping is already active: $luks_name"
             seen_luks_names[$luks_name]=1
-            luks_label=${label:0:43}_luks
-            [[ -z ${seen_labels[$luks_label]:-} ]] || die "extra LUKS label is duplicated: $luks_label"
-            seen_labels[$luks_label]=1
-            assert_label_available "/dev/disk/by-label/$luks_label" "$device_real"
-            extra_mount_luks_labels[index]=$luks_label
+            if [[ $existing == false ]]; then
+                luks_label=${label:0:43}_luks
+                [[ -z ${seen_labels[$luks_label]:-} ]] || die "external volume LUKS label is duplicated: $luks_label"
+                seen_labels[$luks_label]=1
+                assert_label_available "/dev/disk/by-label/$luks_label" "$device_real"
+                ext_vol_luks_labels[index]=$luks_label
+            fi
         fi
-
-        extra_mount_labels_resolved[index]=$label
     done
 
     local earlier
     for ((index = 0; index < count; index++)); do
         for ((earlier = 0; earlier < index; earlier++)); do
-            if [[ ${extra_mount_points[$earlier]} == "${extra_mount_points[$index]}"/* ]]; then
-                die "parent extra mount ${extra_mount_points[$index]} must precede ${extra_mount_points[$earlier]}"
+            if [[ ${ext_vol_mountpoint[$earlier]} == "${ext_vol_mountpoint[$index]}"/* ]]; then
+                die "parent external volume ${ext_vol_mountpoint[$index]} must precede ${ext_vol_mountpoint[$earlier]}"
             fi
         done
     done
@@ -458,6 +512,80 @@ remove_temporary_luks_key() {
             unset 'temporary_luks_key_files[index]'
             break
         fi
+    done
+}
+
+materialize_external_credential() {
+    local output_name=$1
+    local variable_name=$2
+    local credential=${!variable_name-}
+    local credential_file=
+
+    if [[ -n $credential ]]; then
+        credential_file=$(mktemp "$work_root/ext-vol-key.XXXXXX")
+        chmod 0600 "$credential_file"
+        printf '%s' "$credential" >"$credential_file"
+        temporary_credential_files+=("$credential_file")
+    fi
+    external_credential_variables+=("$variable_name")
+    printf -v "$output_name" '%s' "$credential_file"
+}
+
+remove_external_credential() {
+    local variable_name=$1
+    unset "$variable_name"
+}
+
+remove_temporary_credential() {
+    local key_file=$1
+    local index
+
+    [[ -n $key_file ]] || return 0
+    rm -f -- "$key_file"
+    for ((index = 0; index < ${#temporary_credential_files[@]}; index++)); do
+        if [[ ${temporary_credential_files[$index]} == "$key_file" ]]; then
+            unset 'temporary_credential_files[index]'
+            break
+        fi
+    done
+}
+
+prepare_existing_ext_volumes() {
+    local count=${#ext_vol_devices[@]}
+    ((count > 0)) || return 0
+
+    local index device device_real luks_name credential_variable key_file uuid
+    for ((index = 0; index < count; index++)); do
+        [[ ${ext_vol_existing[$index]:-false} == true ]] || continue
+        is_root_backed_ext_vol "$index" && continue
+        luks_name=${ext_vol_luks[$index]:-}
+        if [[ -z $luks_name ]]; then
+            ext_vol_sources_resolved[index]=${ext_vol_devices[$index]}
+            continue
+        fi
+
+        device=${ext_vol_devices[$index]}
+        device_real=$(readlink -f -- "$device")
+        credential_variable=lvc_$luks_name
+        key_file=
+        materialize_external_credential key_file "$credential_variable"
+        if [[ -n $key_file ]]; then
+            log "Opening existing external LUKS volume $luks_name using its configured credential"
+            cryptsetup open --type luks --key-file "$key_file" "$device_real" "$luks_name"
+        else
+            log "Opening existing external LUKS volume $luks_name; enter its passphrase when prompted"
+            cryptsetup open --type luks "$device_real" "$luks_name"
+        fi
+        opened_luks_names+=("$luks_name")
+        uuid=$(cryptsetup luksUUID "$device_real")
+        [[ -n $uuid ]] || die "could not determine existing external LUKS UUID: $device"
+        ext_vol_luks_uuids[index]=$uuid
+        ext_vol_sources_resolved[index]=/dev/mapper/$luks_name
+        enroll_luks_credentials "${ext_vol_mountpoint[$index]}" "$device_real" "$uuid" \
+            "${ext_vol_tpm[$index]:-false}" "${ext_vol_tpm_pcrs[$index]:-}" \
+            "${ext_vol_recovery[$index]:-false}" "$key_file"
+        [[ -z $key_file ]] || remove_temporary_credential "$key_file"
+        remove_external_credential "$credential_variable"
     done
 }
 
@@ -613,7 +741,7 @@ enroll_luks_credentials() {
     systemd-cryptenroll "${unlock_args[@]}" "${enroll_args[@]}" "$device"
 }
 
-format_extra_filesystem() {
+format_ext_vol_filesystem() {
     local filesystem=$1
     local label=$2
     local device=$3
@@ -621,30 +749,33 @@ format_extra_filesystem() {
         btrfs) mkfs.btrfs -f -L "$label" "$device" ;;
         ext4) mkfs.ext4 -F -L "$label" "$device" ;;
         xfs) mkfs.xfs -f -L "$label" "$device" ;;
-        *) die "unsupported extra filesystem: $filesystem" ;;
+        *) die "unsupported external filesystem: $filesystem" ;;
     esac
 }
 
-prepare_extra_filesystems() {
-    local count=${#extra_mount_devices[@]}
+prepare_ext_vol_filesystems() {
+    local count=${#ext_vol_devices[@]}
     ((count > 0)) || return 0
 
-    log "Preparing $count additional state disk(s)"
+    log "Preparing $count external volume(s)"
     local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid key_file
     for ((index = 0; index < count; index++)); do
-        if is_root_backed_extra_mount "$index"; then
-            log "Using root-backed Btrfs subvolume for ${extra_mount_points[$index]}"
+        if is_root_backed_ext_vol "$index"; then
+            log "Using root-backed Btrfs subvolume for ${ext_vol_mountpoint[$index]}"
             continue
         fi
-        device=${extra_mount_devices[$index]}
+        [[ ${ext_vol_existing[$index]:-false} == false ]] || continue
+        device=${ext_vol_devices[$index]}
         device_real=$(readlink -f -- "$device")
-        mount_point=${extra_mount_points[$index]}
-        filesystem=${extra_mount_filesystems[$index]}
-        encrypted=${extra_mount_encrypted[$index]:-false}
-        tpm2=${extra_mount_tpm2[$index]:-false}
-        tpm2_pcrs=${extra_mount_tpm2_pcrs[$index]:-}
-        tpm2_recovery=${extra_mount_tpm2_recovery[$index]:-false}
-        label=${extra_mount_labels_resolved[$index]}
+        mount_point=${ext_vol_mountpoint[$index]}
+        filesystem=${ext_vol_fs[$index]}
+        luks_name=${ext_vol_luks[$index]:-}
+        encrypted=false
+        [[ -n $luks_name ]] && encrypted=true
+        tpm2=${ext_vol_tpm[$index]:-false}
+        tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
+        tpm2_recovery=${ext_vol_recovery[$index]:-false}
+        label=${ext_vol_labels_resolved[$index]}
 
         log "Erasing $device and creating $filesystem for $mount_point"
         lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$device_real"
@@ -654,8 +785,7 @@ prepare_extra_filesystems() {
 
         block_device=$device_real
         if [[ $encrypted == true ]]; then
-            luks_name=${extra_mount_luks_names[$index]:-${label}_crypt}
-            luks_label=${extra_mount_luks_labels[$index]}
+            luks_label=${ext_vol_luks_labels[$index]}
             key_file=
             luks_key_file_for_volume key_file
             if [[ -n $key_file ]]; then
@@ -670,7 +800,7 @@ prepare_extra_filesystems() {
             fi
             uuid=$(cryptsetup luksUUID "$device_real")
             opened_luks_names+=("$luks_name")
-            extra_mount_luks_uuids[index]=$uuid
+            ext_vol_luks_uuids[index]=$uuid
             block_device=/dev/mapper/$luks_name
             enroll_luks_credentials "$mount_point" "$device_real" "$uuid" "$tpm2" "$tpm2_pcrs" "$tpm2_recovery" "$key_file"
             if [[ $luks_ephemeral_key == true ]]; then
@@ -679,9 +809,10 @@ prepare_extra_filesystems() {
             fi
         fi
 
-        format_extra_filesystem "$filesystem" "$label" "$block_device"
+        format_ext_vol_filesystem "$filesystem" "$label" "$block_device"
         udevadm settle
         wait_for_device "/dev/disk/by-label/$label"
+        ext_vol_sources_resolved[index]=/dev/disk/by-label/$label
     done
 }
 
@@ -711,9 +842,10 @@ mount_install_target() {
 }
 
 prepare_storage() {
+    prepare_existing_ext_volumes
     prepare_partitions
     format_filesystems
     create_subvolumes
-    prepare_extra_filesystems
+    prepare_ext_vol_filesystems
     mount_install_target
 }

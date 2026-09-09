@@ -58,10 +58,10 @@ prepare_mount_target() {
     # symlink, including when the requested descendant already exists.
     while [[ $parent_path != / ]]; do
         if [[ -L $parent_path ]]; then
-            die "extra mount target is a symlink: $requested_path"
+            die "external volume target is a symlink: $requested_path"
         fi
         if [[ -e $parent_path ]]; then
-            [[ -d $parent_path ]] || die "extra mount target is not a directory: $requested_path"
+            [[ -d $parent_path ]] || die "external volume target is not a directory: $requested_path"
         fi
         parent_path=${parent_path%/*}
         [[ -n $parent_path ]] || parent_path=/
@@ -71,17 +71,17 @@ prepare_mount_target() {
 
     mkdir -p -- "$target_path"
     [[ ! -L $target_path && -d $target_path ]] ||
-        die "extra mount target could not be created as a directory: $requested_path"
+        die "external volume target could not be created as a directory: $requested_path"
 }
 
-root_backed_extra_mount_path() {
+root_backed_ext_vol_path() {
     local index=$1
     local subvolume
-    subvolume=$(root_backed_extra_mount_subvolume "$index") || return 1
+    subvolume=$(root_backed_ext_vol_subvolume "$index") || return 1
     printf '%s%s\n' "$install_root" "${subvolume#root}"
 }
 
-prepare_root_backed_extra_mount() {
+prepare_root_backed_ext_vol() {
     local subvolume=$1
     local subvolume_path=$2
     local parent_path=$subvolume_path
@@ -92,10 +92,10 @@ prepare_root_backed_extra_mount() {
     # replace a symlink or non-directory supplied by the image.
     while [[ $parent_path != / ]]; do
         if [[ -L $parent_path ]]; then
-            die "root-backed extra subvolume is a symlink: $subvolume"
+            die "root-backed external volume subvolume is a symlink: $subvolume"
         fi
         if [[ -e $parent_path ]]; then
-            [[ -d $parent_path ]] || die "root-backed extra subvolume is not a directory: $subvolume"
+            [[ -d $parent_path ]] || die "root-backed external volume subvolume is not a directory: $subvolume"
         fi
         parent_path=${parent_path%/*}
         [[ -n $parent_path ]] || parent_path=/
@@ -104,10 +104,10 @@ prepare_root_backed_extra_mount() {
     if btrfs subvolume show "$subvolume_path" >/dev/null 2>&1; then
         return 0
     fi
-    [[ ! -L $subvolume_path ]] || die "root-backed extra subvolume is a symlink: $subvolume"
+    [[ ! -L $subvolume_path ]] || die "root-backed external volume subvolume is a symlink: $subvolume"
 
     if [[ -e $subvolume_path ]]; then
-        [[ -d $subvolume_path ]] || die "root-backed extra subvolume is not a directory: $subvolume"
+        [[ -d $subvolume_path ]] || die "root-backed external volume subvolume is not a directory: $subvolume"
         old_path="${subvolume_path}.bootc-installer-old"
         [[ ! -e $old_path && ! -L $old_path ]] ||
             die "temporary migration path already exists: $old_path"
@@ -125,14 +125,14 @@ prepare_root_backed_extra_mount() {
     fi
 }
 
-prepare_extra_mount_targets() {
+prepare_ext_vol_targets() {
     local config_root=$1
     local persistent_var=$2
-    local count=${#extra_mount_devices[@]}
+    local count=${#ext_vol_devices[@]}
     local index mount_point target_path
 
     for ((index = 0; index < count; index++)); do
-        mount_point=${extra_mount_points[$index]}
+        mount_point=${ext_vol_mountpoint[$index]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
         prepare_mount_target "$mount_point" "$target_path"
     done
@@ -143,25 +143,26 @@ clear_directory() {
     find "$directory" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 }
 
-configure_extra_mounts() {
+configure_ext_vols() {
     local config_root=$1
     local persistent_var=$2
-    local count=${#extra_mount_devices[@]}
+    local count=${#ext_vol_devices[@]}
     ((count > 0)) || return 0
 
     local index label filesystem options mount_point target_path source staging root_subvolume root_subvolume_path
     for ((index = 0; index < count; index++)); do
-        label=${extra_mount_labels_resolved[$index]}
-        filesystem=${extra_mount_filesystems[$index]}
-        options=${extra_mount_options[$index]:-defaults}
-        mount_point=${extra_mount_points[$index]}
+        label=${ext_vol_labels_resolved[$index]:-}
+        filesystem=${ext_vol_fs[$index]}
+        options=${ext_vol_opts[$index]:-defaults}
+        mount_point=${ext_vol_mountpoint[$index]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
-        source=/dev/disk/by-label/$label
-        staging=$work_root/extra-$index
+        source=${ext_vol_sources_resolved[$index]:-}
+        [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
+        staging=$work_root/ext-vol-$index
 
-        if root_subvolume=$(root_backed_extra_mount_subvolume "$index"); then
-            root_subvolume_path=$(root_backed_extra_mount_path "$index")
-            prepare_root_backed_extra_mount "$root_subvolume" "$root_subvolume_path"
+        if root_subvolume=$(root_backed_ext_vol_subvolume "$index"); then
+            root_subvolume_path=$(root_backed_ext_vol_path "$index")
+            prepare_root_backed_ext_vol "$root_subvolume" "$root_subvolume_path"
             # /var and its descendants already name the selected subvolume in
             # the installed tree.  Leave that mount in place; the boot karg
             # will mount the same root-backed subvolume in the deployed system.

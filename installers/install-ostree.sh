@@ -24,7 +24,7 @@ ostree_validate_mount_target() {
     local mount_point=$1
     case "$mount_point" in
         /ostree | /ostree/*)
-            die "extra mount point is not a supported stateful path: $mount_point"
+            die "external volume mountpoint is not a supported stateful path: $mount_point"
             ;;
     esac
 }
@@ -43,10 +43,10 @@ ostree_build_bootc_args() {
 }
 
 ostree_append_external_var_karg() {
-    local label=$1
+    local source=$1
     local filesystem=$2
     local options=$3
-    bootc_args+=("--karg=systemd.mount-extra=/dev/disk/by-label/${label}:/var:${filesystem}:${options}")
+    bootc_args+=("--karg=systemd.mount-extra=${source}:/var:${filesystem}:${options}")
 }
 
 ostree_locate_deployment() {

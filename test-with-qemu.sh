@@ -17,6 +17,7 @@ INSTALLER_BACKEND=${INSTALLER_BACKEND:-composefs}
 INSTALLER_NAME=
 LUKS_PASSWORD_FILE=${LUKS_PASSWORD_FILE:-}
 RECOVERY_KEY_FILE=${RECOVERY_KEY_FILE:-}
+QEMU_PREINSTALL_HOOK=${QEMU_PREINSTALL_HOOK:-}
 TARGET_DISK_SIZE=${TARGET_DISK_SIZE:-40G}
 EXTRA_DISK_SIZE=${EXTRA_DISK_SIZE:-40G}
 SCRATCH_DISK_SIZE=${SCRATCH_DISK_SIZE:-10G}
@@ -58,6 +59,7 @@ Install a bootc image in a native-architecture QEMU VM, or boot an existing test
   -P FILE     LUKS-password payload; the config selects its guest path.
                                                                [LUKS_PASSWORD_FILE]
   -k FILE     Host recovery-key output file.                 [RECOVERY_KEY_FILE]
+  -H FILE     Trusted guest pre-install hook for extra.qcow2. [QEMU_PREINSTALL_HOOK]
   -d SIZE     Target NVMe qcow2 size.                        [TARGET_DISK_SIZE]
   -e SIZE     Extra NVMe qcow2 size.                         [EXTRA_DISK_SIZE]
   -t SIZE     Temporary-storage qcow2 size.                  [SCRATCH_DISK_SIZE]
@@ -74,7 +76,7 @@ first boot, or '-r all' to install and immediately start the installed system.
 Additional environment-only overrides:
   QEMU_ACCEL, QEMU_DISPLAY, FIRMWARE_CODE, FIRMWARE_VARS_TEMPLATE,
   BOOT_MENU_DELAY_SECS, GRUB_KERNEL_LINE_DOWNS, INSTALL_TIMEOUT_SECS,
-  LIVE_KARGS.
+  LIVE_KARGS. QEMU_PREINSTALL_HOOK may also name the trusted hook file.
 EOF
 }
 
@@ -89,7 +91,7 @@ log() {
 
 parse_options() {
     local option
-    while getopts ':a:r:i:C:w:s:I:b:P:k:d:e:t:qm:c:fh' option; do
+    while getopts ':a:r:i:C:w:s:I:b:P:k:H:d:e:t:qm:c:fh' option; do
         case "$option" in
             a) QEMU_ARCH=$OPTARG ;;
             r) RUN_MODE=$OPTARG ;;
@@ -101,6 +103,7 @@ parse_options() {
             b) INSTALLER_BACKEND=$OPTARG ;;
             P) LUKS_PASSWORD_FILE=$OPTARG ;;
             k) RECOVERY_KEY_FILE=$OPTARG ;;
+            H) QEMU_PREINSTALL_HOOK=$OPTARG ;;
             d) TARGET_DISK_SIZE=$OPTARG ;;
             e) EXTRA_DISK_SIZE=$OPTARG ;;
             t) SCRATCH_DISK_SIZE=$OPTARG ;;
@@ -200,6 +203,11 @@ validate_configuration() {
     [[ -f $INSTALLER_CONFIG && -r $INSTALLER_CONFIG ]] ||
         die "installer config is not a readable regular file: $INSTALLER_CONFIG"
     INSTALLER_CONFIG=$(absolute_existing_path "$INSTALLER_CONFIG")
+    if [[ -n $QEMU_PREINSTALL_HOOK ]]; then
+        [[ -f $QEMU_PREINSTALL_HOOK && -r $QEMU_PREINSTALL_HOOK ]] ||
+            die "QEMU pre-install hook is not a readable regular file: $QEMU_PREINSTALL_HOOK"
+        QEMU_PREINSTALL_HOOK=$(absolute_existing_path "$QEMU_PREINSTALL_HOOK")
+    fi
 }
 
 initialize_paths() {
@@ -241,6 +249,7 @@ initialize_paths() {
     GUEST_PERSISTENT_DIR=/etc/test-install-qemu-bootc
     GUEST_RUNTIME_DIR=/run/test-install-qemu-bootc
     GUEST_WRAPPER=/usr/local/sbin/test-install-qemu-bootc
+    GUEST_PREINSTALL_HOOK=/usr/local/sbin/test-install-qemu-preinstall
     GUEST_INSTALL_CONFIG=$GUEST_PERSISTENT_DIR/install.conf
     GUEST_RECOVERY_FILE=$GUEST_RUNTIME_DIR/recovery-keys.txt
     GUEST_PASSWORD_FILE=$GUEST_PERSISTENT_DIR/luks-password
@@ -250,7 +259,7 @@ initialize_paths() {
     RECOVERY_PORT=/dev/virtio-ports/$RECOVERY_PORT_NAME
 
     local qemu_path_value
-    for qemu_path_value in "$QEMU_WORK_DIR" "$RECOVERY_KEY_FILE"; do
+    for qemu_path_value in "$QEMU_WORK_DIR" "$RECOVERY_KEY_FILE" "$QEMU_PREINSTALL_HOOK"; do
         [[ $qemu_path_value != *,* && $qemu_path_value != *$'\n'* ]] ||
             die "QEMU paths cannot contain commas or newlines: $qemu_path_value"
     done
@@ -485,6 +494,7 @@ create_live_wrapper() {
         printf 'target_device=%q\n' "$GUEST_TARGET_DISK"
         printf 'extra_device=%q\n' "$GUEST_EXTRA_DISK"
         printf 'scratch_device=%q\n' /dev/disk/by-id/virtio-bootc-scratch
+        printf 'preinstall_hook=%q\n' "${QEMU_PREINSTALL_HOOK:+$GUEST_PREINSTALL_HOOK}"
         printf 'installer_trace=%q\n' "$INSTALLER_TRACE"
         cat <<'EOF'
 set -Eeuo pipefail
@@ -572,6 +582,15 @@ extra_nvme_device=$(readlink -f -- "$extra_device")
     exit 1
 }
 lsblk -o NAME,PATH,TRAN,SIZE,TYPE,MODEL,SERIAL "$target_nvme_device" "$extra_nvme_device"
+mkdir -p "$runtime_dir"
+if [[ -n $preinstall_hook ]]; then
+    echo "Running trusted QEMU pre-install hook"
+    QEMU_PREINSTALL_TARGET_DEVICE="$target_device" \
+        QEMU_PREINSTALL_EXTRA_DEVICE="$extra_device" \
+        QEMU_PREINSTALL_SCRATCH_DEVICE="$scratch_device" \
+        QEMU_PREINSTALL_WORK_DIR="$runtime_dir" \
+        "$preinstall_hook" "$target_device" "$extra_device" "$scratch_device"
+fi
 [[ -b $scratch_device ]] || {
     echo "Temporary-storage disk did not appear: $scratch_device" >&2
     exit 1
@@ -592,7 +611,6 @@ if ! podman run --rm --pull=never --entrypoint /usr/bin/test "$image_ref" \
     echo "Pulled image does not provide an executable installer for backend: $installer_name" >&2
     exit 1
 fi
-mkdir -p "$runtime_dir"
 podman run --rm --pull=never --privileged \
     --user 0:0 \
     --userns host \
@@ -619,9 +637,12 @@ EOF
 }
 
 create_live_ignition() {
-    local wrapper_source config_source password_source=
+    local wrapper_source config_source hook_source='' password_source=''
     wrapper_source=$(data_url_from_file "$LIVE_WRAPPER")
     config_source=$(data_url_from_file "$INSTALL_CONFIG")
+    if [[ -n $QEMU_PREINSTALL_HOOK ]]; then
+        hook_source=$(data_url_from_file "$QEMU_PREINSTALL_HOOK")
+    fi
     if [[ -n $LUKS_PASSWORD_FILE ]]; then
         password_source=$(data_url_from_file "$LUKS_PASSWORD_FILE")
     fi
@@ -645,6 +666,16 @@ create_live_ignition() {
         "contents": { "source": "$config_source" }
       }
 EOF
+        if [[ -n $hook_source ]]; then
+            cat <<EOF
+      ,{
+        "path": "$GUEST_PREINSTALL_HOOK",
+        "mode": 448,
+        "overwrite": true,
+        "contents": { "source": "$hook_source" }
+      }
+EOF
+        fi
         if [[ -n $password_source ]]; then
             cat <<EOF
       ,{

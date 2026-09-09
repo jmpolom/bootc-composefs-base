@@ -3,21 +3,21 @@
 The two entrypoints deliberately keep the native composefs and OSTree deployment flows separate.
 Both installers erase one configured whole GPT disk, create an ESP, an XBOOTLDR-style `/boot`
 partition, and a Btrfs root partition. They support optional LUKS2/TPM2 enrollment, root-backed
-Btrfs state subvolumes, and additional stateful mounts. They do not generate `/etc/fstab` or
+Btrfs state subvolumes, and external volumes. They do not generate `/etc/fstab` or
 `/etc/crypttab`.
 
 ## Configuration
 
 Common settings in `install.env.example` come first: the target disk and image references, disk
-sizes, root encryption and enrollment, recovery output, mount options, indexed extra-mount arrays,
+sizes, root encryption and enrollment, recovery output, mount options, indexed external volume arrays,
 the first user, kernel arguments, and working paths. The final labeled sections contain settings
-specific to composefs (`bootloader` and `allow_missing_verity`) and OSTree (`stateroot`). Do not add
-an `existing` setting: the current installer lifecycle is intentionally limited to preparing its
-new installation storage and configuring the selected deployment.
+specific to composefs (`bootloader` and `allow_missing_verity`) and OSTree (`stateroot`). The
+`ext_vol_existing` defaults to `false`. Set it to `true` to retain and mount a pre-existing block
+volume (disk, partition, LV, or mapper) without formatting or changing its filesystem identity.
 
 Mount-option settings describe newly created storage. A colon is rejected where an option is
 serialized by `systemd.mount-extra` because that argument uses `WHAT:WHERE:FSTYPE:OPTIONS`; it is
-not a general filesystem-option allowlist. Each `extra_mount_points` value is a literal absolute
+not a general filesystem-option allowlist. Each `ext_vol_mountpoint` value is a literal absolute
 installed-tree target. It is never rewritten below `/var`, so `/home`, `/opt`, `/srv`, and `/data`
 remain those exact targets. An existing directory is used, a missing directory and all parents are
 created, and an image symlink or other non-directory is rejected unchanged without replacement,
@@ -32,9 +32,8 @@ state path `P`, their exact generated records are:
 | `separate_home=true` | `/dev/disk/by-label/root` | `/var/home` | `btrfs` / `root` | `subvol=root${P}/home,$state_mount_options` |
 | `separate_opt=true` | `/dev/disk/by-label/root` | `/var/opt` | `btrfs` / `root` | `subvol=root${P}/opt,$state_mount_options` |
 
-The generated records also set `extra_mount_encrypted`, `extra_mount_tpm2`, and
-`extra_mount_tpm2_recovery` to `false`, and `extra_mount_luks_names` and
-`extra_mount_tpm2_pcrs` to empty. `P` is `/state/os/default/var` for composefs and
+The generated records set `ext_vol_luks` to empty, `ext_vol_tpm`, `ext_vol_recovery`, and
+`ext_vol_existing` to `false`, and `ext_vol_tpm_pcrs` to empty. `P` is `/state/os/default/var` for composefs and
 `/ostree/deploy/$stateroot/var` for OSTree, so for example composefs `separate_home` selects
 `subvol=root/state/os/default/var/home`, while OSTree selects
 `subvol=root/ostree/deploy/$stateroot/var/home`. Explicit records are retained and generated
@@ -52,7 +51,7 @@ The final implementation has three shared libraries and two backend entrypoints:
   validation, generic bootc arguments, and cleanup. It sources the other two libraries.
 - `lib/storage.sh` owns shortcut normalization, storage-array and mount-option validation, and
   preparation of disks, filesystems, Btrfs subvolumes, LUKS, and mounts.
-- `lib/state.sh` owns exact-path target preparation, state migration, extra-mount population, the
+- `lib/state.sh` owns exact-path target preparation, state migration, external volume population, the
   first-user setup, and SELinux relabeling.
 - `install-composefs.sh` owns composefs paths, options, services, assets, and post-install work;
   `install-ostree.sh` owns OSTree paths, options, and deployment lookup.
@@ -71,9 +70,9 @@ and backend requirements before recovery output is initialized or any disk is er
 every reverse-order unmount and mapper close plus temporary-key removal, logs individual failures,
 preserves an original failure status,
 and reports success only when cleanup succeeds. There are no forced/lazy unmounts, unspecified
-retries, rollback machinery, or general existing-filesystem lifecycle in scope. Additional
-whole-disk records are newly created storage; root-backed normalized records create/reuse only
-their selected Btrfs subvolumes within the newly created root filesystem.
+retries, or rollback machinery. Additional whole-disk records are newly created storage; records
+marked `ext_vol_existing=true` are activated and mounted in place; root-backed normalized records
+create/reuse only their selected Btrfs subvolumes within the newly created root filesystem.
 
 ## Usage
 
@@ -107,12 +106,12 @@ target image must already grant sudo access to `wheel`.
 ## Backend behavior and layout
 
 `install-composefs.sh` accepts `bootloader=grub` or `bootloader=systemd`, passes
-`--composefs-backend`, and protects `/composefs` and `/state` from extra mounts. Its physical
-`/var` is `/state/os/default/var`; an external extra filesystem targeting literal `/var` is mounted
+`--composefs-backend`, and protects `/composefs` and `/state` from external volumes. Its physical
+`/var` is `/state/os/default/var`; an external filesystem targeting literal `/var` is mounted
 in the initramfs below `/sysroot/state/os/default/var` before `bootc-root-setup.service`.
 
 `install-ostree.sh` supports GRUB only, validates `stateroot`, passes `--stateroot`, and protects
-`/ostree` from extra mounts. Its physical `/var` is
+`/ostree` from external volumes. Its physical `/var` is
 `/ostree/deploy/$stateroot/var`; it preserves the existing real-root `/var` strategy and uses
 `systemd.mount-extra` for an external `/var` filesystem. OSTree deployment lookup uses
 `ostree admin --sysroot=... --print-current-dir`.
@@ -135,32 +134,62 @@ subvolumes at the backend-specific physical `/var` path and its `home`/`opt` des
 indexed record shown above; there is no later shortcut-specific path handling. Other literal
 targets are prepared and mounted at their requested paths.
 
-## Additional state disks
+## External volumes
 
-Additional mounts are parallel indexed arrays in the env file. The following three arrays are
+External volumes are parallel indexed arrays in the env file. The following three arrays are
 required and must have equal lengths:
 
 ```bash
-extra_mount_devices=(/dev/vdb /dev/vdc)
-extra_mount_points=(/var/lib/containers /srv)
-extra_mount_filesystems=(xfs btrfs)
+ext_vol_devices=(/dev/vdb /dev/vdc)
+ext_vol_mountpoint=(/var/lib/containers /srv)
+ext_vol_fs=(xfs btrfs)
 ```
 
-Optional arrays at the same indexes are `extra_mount_encrypted`, `extra_mount_labels`,
-`extra_mount_options`, `extra_mount_luks_names`, `extra_mount_tpm2`, `extra_mount_tpm2_pcrs`, and
-`extra_mount_tpm2_recovery`. Supported filesystems are Btrfs, ext4, and XFS. Each entry identifies a
-whole disk, which is wiped and formatted directly without a partition table. `-y` authorizes erasure
-of the installation disk and all additional state disks.
+Optional arrays at the same indexes are `ext_vol_luks`, `ext_vol_opts`, `ext_vol_tpm`,
+`ext_vol_tpm_pcrs`, `ext_vol_recovery`, and `ext_vol_existing`. An empty `ext_vol_luks` entry
+creates or mounts a plaintext filesystem; a nonempty entry is the lower-case LUKS mapper name.
+Created volumes support Btrfs, ext4, and XFS and identify whole disks, which are wiped and
+formatted directly without a partition table. Existing volumes may use any filesystem supported
+by the running kernel and retain their filesystem and LUKS metadata. `-y` authorizes erasure of
+the installation disk and created external volumes.
 
-Labels default to a lower-case form of the logical path and are truncated only to meet filesystem
-limits. Runtime sources always use `/dev/disk/by-label/...`. Encrypted entries receive a LUKS2
-label, a stable mapper name, and `rd.luks.uuid=`, `rd.luks.name=`, and `rd.luks.options=` arguments.
+Filesystem labels are derived from the lower-case logical path and truncated only to meet filesystem
+limits; they are not configurable for created volumes. Created runtime sources use
+`/dev/disk/by-label/...`; existing plaintext sources use the configured device and existing
+encrypted sources use `/dev/mapper/<ext_vol_luks>`. Encrypted entries receive the configured
+mapper name, plus `rd.luks.uuid=`, `rd.luks.name=`, and `rd.luks.options=` arguments.
+
+For an existing encrypted volume, an optional `lvc_<ext_vol_luks>` variable supplies either a raw
+password or a systemd recovery key. It may be set in the configuration or inherited from the
+environment. The installer uses it only during activation/enrollment, then removes the variable
+before invoking bootc. With no value, cryptsetup uses its normal token and interactive prompt
+behavior.
+
+Because installer `-t` shell tracing can expose configuration and raw `lvc_<mapper_name>` credential
+values, do not use the tracing option when an `lvc_*` credential is set. The installer intentionally
+does not sanitize xtrace output or attempt credential-leak detection.
 
 Existing image state is migrated from each requested literal target directory. `/var` and its
 descendants are accessed below the backend's physical `/var`; every other allowed target is
 accessed below the deployment configuration root. The requested path is never resolved through
 live-image aliases. `/etc`, `/boot`, immutable `/usr` paths, backend storage paths, and API
 filesystems are rejected.
+
+The external-volume mountpoint API is deliberately bounded. Every record (created, existing, or
+root-backed) rejects `/`, `/boot` and descendants, `/etc` and descendants, `/usr` and descendants
+except `/usr/local` and its descendants, and the `/proc`, `/sys`, `/dev`, `/run`, and `/sysroot`
+trees. Composefs additionally rejects `/composefs` and `/state` trees; OSTree additionally rejects
+the `/ostree` tree. Targets must remain absolute, normalized, unique, and ordered parent before
+child. External `/etc` storage is not supported. Legacy external-mount variables are not part of
+the API and are ignored.
+
+Enrollment of an existing encrypted volume is additive: opening it and enrolling TPM2 or a new
+recovery key preserves its existing filesystem, LUKS UUID, and existing key slots. The configured
+`lvc_<mapper>` value is a raw password or systemd recovery key supplied in the sourced config or
+inherited process environment; it is materialized only for activation and enrollment, then removed
+from the installer process environment. A missing value retains normal cryptsetup token and prompt
+behavior. Existing plaintext or encrypted records may use any filesystem accepted by the running
+kernel; `ext_vol_fs` describes the expected mount type and is not used to format existing media.
 
 For composefs, an external filesystem targeting `/var` is mounted during the initramfs below
 `/sysroot/state/os/default/var`, explicitly before `bootc-root-setup.service`; composefs then
@@ -189,13 +218,13 @@ For LUKS, the scripts add `rd.luks.uuid=`, `rd.luks.name=`, and
 ## TPM2 and recovery enrollment
 
 TPM2 policy is configured per LUKS volume. Use `root_tpm2=true` for root, or the matching
-`extra_mount_tpm2` array entry for an additional volume. This per-volume model adds three settings
+`ext_vol_tpm` array entry for an additional volume. This per-volume model adds three settings
 per volume but permits different PCR and recovery policies for root and independently replaceable
 state disks; global settings would make those common mixed-storage cases need exceptions.
 
-`root_tpm2_pcrs` and `extra_mount_tpm2_pcrs` accept the `systemd-cryptenroll --tpm2-pcrs=` syntax.
+`root_tpm2_pcrs` and `ext_vol_tpm_pcrs` accept the `systemd-cryptenroll --tpm2-pcrs=` syntax.
 Leave an entry empty to omit the option and adopt the installed systemd version's default. Set the
-corresponding `root_tpm2_recovery` or `extra_mount_tpm2_recovery` value to `true` to enroll a recovery
+corresponding `root_tpm2_recovery` or `ext_vol_recovery` value to `true` to enroll a recovery
 key. Recovery enrollment is accepted only for a TPM-enabled encrypted volume.
 
 When recovery enrollment is requested, `recovery_key_output_file` is required. The installer creates
@@ -262,6 +291,47 @@ locally built images.
 Existing VM state is never replaced unless `-f` is supplied to an install mode. See
 `./test-with-qemu.sh -h` for the complete CLI and corresponding environment variables. The harness
 enables installer shell tracing by default; use `-q` or `INSTALLER_TRACE=false` for quieter output.
+
+Existing-volume regressions use an optional trusted pre-install hook. `-H FILE` (or
+`QEMU_PREINSTALL_HOOK`) copies the host-supplied executable into the live guest and runs it after
+the target and extra by-id disks are checked, but before Podman invokes the installer. The hook is
+called with target, extra, and scratch by-id paths as positional arguments and also receives
+`QEMU_PREINSTALL_TARGET_DEVICE`, `QEMU_PREINSTALL_EXTRA_DEVICE`, `QEMU_PREINSTALL_SCRATCH_DEVICE`,
+and `QEMU_PREINSTALL_WORK_DIR`. This guest-side stage works on macOS where host tools cannot attach
+the qcow2 image. It is optional, so existing invocations and `-q` behavior are unchanged. The
+fixture hooks generate credentials in the guest runtime directory and do not commit secrets.
+
+For composefs existing LUKS2+Btrfs `/var`:
+
+```bash
+./test-with-qemu.sh -r all -C test-configs/qemu-existing-composefs.env \
+  -H test-configs/qemu-hooks/prepare-existing-composefs-var.sh \
+  -i ghcr.io/example/os:tag
+```
+
+For OSTree existing LUKS2+XFS `/opt` (the hook's `lvc_existing_opt` is a systemd-format recovery
+key):
+
+```bash
+./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-existing-ostree.env \
+  -H test-configs/qemu-hooks/prepare-existing-ostree-opt.sh \
+  -i ghcr.io/example/os:tag
+```
+
+After boot, verify the two recovery records, `findmnt /var` or `findmnt /opt`, and the seed marker
+under `qemu-existing/`. If the supplied image contains the fixture's deterministic
+`qemu-existing/conflict-marker`, its image content must replace the hook seed while the distinct
+`seed-marker` remains. The hook records the pre-install LUKS UUID in the install serial log (as
+`QEMU_PREINSTALL_EXISTING_UUID=...`) so it can be compared with `cryptsetup luksUUID` after
+installation. For example, inspect the host log and run the following in the booted guest (using
+`/opt` for the OSTree run):
+
+```bash
+grep QEMU_PREINSTALL_EXISTING_UUID qemu-test/install-serial.log
+findmnt --mountpoint /var
+cryptsetup luksUUID /dev/disk/by-id/nvme-QEMU_NVMe_Ctrl_bootc-extra_1
+cat /var/qemu-existing/seed-marker
+```
 
 ## Removing a backend
 
