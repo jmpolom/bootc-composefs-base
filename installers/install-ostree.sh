@@ -37,6 +37,7 @@ ostree_build_bootc_args() {
         --bootloader=grub
         "--stateroot=$stateroot"
     )
+
     [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")
     [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
     append_common_kargs "$physical_var_path" "$root_setup_unit"
@@ -46,11 +47,13 @@ ostree_append_external_var_karg() {
     local source=$1
     local filesystem=$2
     local options=$3
+
     bootc_args+=("--karg=systemd.mount-extra=${source}:/var:${filesystem}:${options}")
 }
 
 ostree_locate_deployment() {
     local deployment_path
+
     deployment_path=$(ostree admin --sysroot="$install_root" --print-current-dir)
     [[ -n $deployment_path ]] || die "OSTree did not report a current deployment"
     if [[ $deployment_path == "$install_root"/* ]]; then

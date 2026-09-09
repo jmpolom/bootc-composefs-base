@@ -75,6 +75,7 @@ composefs_build_bootc_args() {
         --composefs-backend
         "--bootloader=$bootloader"
     )
+
     [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")
     [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
     [[ $allow_missing_verity == true ]] && bootc_args+=(--allow-missing-verity)
@@ -85,11 +86,13 @@ composefs_append_external_var_karg() {
     local source=$1
     local filesystem=$2
     local options=$3
+
     bootc_args+=("--karg=rd.systemd.mount-extra=${source}:/sysroot${physical_var_path}:${filesystem}:${options},x-systemd.before=${root_setup_unit}")
 }
 
 composefs_locate_deployment() {
     local -a composefs_states=()
+
     mapfile -t composefs_states < <(find "$install_root/state/deploy" -mindepth 1 -maxdepth 1 -type d -print)
     ((${#composefs_states[@]} == 1)) ||
         die "expected exactly one composefs deployment state, found ${#composefs_states[@]}"

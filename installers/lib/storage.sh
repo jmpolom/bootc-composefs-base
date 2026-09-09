@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2154,SC2178
 declare -ag cleanup_mounts=() opened_luks_names=() temporary_credential_files=() external_credential_variables=() vol_list=()
+
 is_safe_relative_subvolume() {
     local path=${1:-} part
     local -a parts=()
+
     case $path in
         ''|/*|*/|*//*|*[[:space:]]*|*,*|*:*|*$'\n'*) return 1 ;;
     esac
@@ -12,14 +14,18 @@ is_safe_relative_subvolume() {
         [[ -n $part && $part != . && $part != .. ]] || return 1
     done
 }
+
 validate_storage_label() {
     local value=$1 description=$2 limit=$3
+
     [[ $value =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "$description is invalid: $value"
     ((${#value} <= limit)) || die "$description is too long: $value"
 }
+
 normalize_volume_record() {
     local record=$1 field
     local -n volume=$record
+
     for field in encryption credential subvol_action mount_options tpm2 recovery; do
         volume["$field"]=${volume[$field]:-none}
         case $field:${volume[$field]} in
@@ -27,6 +33,7 @@ normalize_volume_record() {
             tpm2:none|recovery:none) volume["$field"]=false ;;
         esac
     done
+
     if [[ -z ${volume[phase]:-} ]]; then
         volume[phase]=postdeploy
         if [[ $record == vol_root || $record == vol_boot || $record == vol_esp ]]; then
@@ -34,14 +41,18 @@ normalize_volume_record() {
         fi
     fi
 }
+
 validate_volume_mount_options() {
     local record=$1
     local -n volume=$record
     local options=${volume[mount_options]}
+
     [[ -n $options && $options != *:* && $options != *$'\n'* ]] || die "$record mount_options is invalid"
     local token
     local -a tokens=()
+
     IFS=, read -r -a tokens <<< "$options"
+
     for token in "${tokens[@]}"; do
         case "${volume[fs]}:$token" in
             btrfs:subvol=* | btrfs:subvolid=*)
@@ -55,9 +66,11 @@ validate_volume_mount_options() {
         esac
     done
 }
+
 normalize_volume_shortcuts() {
     local switch value target subvol record
     local -n root=vol_root
+
     for switch in separate_var separate_home separate_opt; do
         value=${!switch:-false}
         is_boolean "$value" || die "$switch must be true or false"
@@ -70,6 +83,7 @@ normalize_volume_shortcuts() {
             separate_opt)
                 target=/var/opt; subvol=${root[subvol]:-root}${physical_var_path}/opt ;;
         esac
+
         for record in "${vol_list[@]}"; do
             local -n existing=$record
             [[ ${existing[mountpoint]:-} != "$target" ]] || die "$switch conflicts with $target"
@@ -87,10 +101,13 @@ normalize_volume_shortcuts() {
         unset "$switch"
     done
 }
+
 record_names_valid() {
     local record declaration
     local -A seen=()
+
     ((${#vol_list[@]} >= 3)) || die "vol_list must begin with vol_root, vol_boot, vol_esp"
+
     [[ ${vol_list[0]} == vol_root && ${vol_list[1]} == vol_boot && ${vol_list[2]} == vol_esp ]] ||
         die "vol_list must explicitly begin with vol_root vol_boot vol_esp"
     for record in "${vol_list[@]}"; do
@@ -101,12 +118,15 @@ record_names_valid() {
         [[ $declaration == 'declare -A '* ]] || die "$record must be an associative array"
     done
 }
+
 validate_volume_mount() {
     local record=$1
     local -n volume=$record
     local point=${volume[mountpoint]:-}
+
     is_normalized_absolute_path "$point" ||
         die "$record mountpoint is invalid: $point"
+
     case "$point:$record" in
         /:vol_root|/boot:vol_boot|/boot/efi:vol_esp) ;;
         /:*|/boot:*|/boot/*:*|/etc:*|/etc/*:*|/usr:*|/usr/*:*|/proc:*|/proc/*:*|/sys:*|/sys/*:*|/dev:*|/dev/*:*|/run:*|/run/*:*|/state:*|/state/*:*|/sysroot:*|/sysroot/*:*)
@@ -114,23 +134,29 @@ validate_volume_mount() {
     esac
     [[ -z ${installer_backend:-} ]] || validate_backend_mount_target "$point"
 }
+
 require_volume_fields() {
     local record=$1 field
     local -n volume=$record
     shift
+
     for field; do
         [[ -n ${volume[$field]:-} ]] || die "$record requires $field"
     done
 }
+
 remember_volume_key() {
     local map=$1 key=$2 message=$3 record=$4
     local -n seen=$map
+
     [[ -z ${seen[$key]:-} ]] || die "$message"
     seen[$key]=$record
 }
+
 validate_volume_format() {
     local record=$1
     local -n volume=$record
+
     case ${volume[action]} in
         relation)
             require_volume_fields "$record" backing fs
@@ -139,6 +165,7 @@ validate_volume_format() {
             ;;
         create)
             local limit
+
             case ${volume[fs]:-} in
                 btrfs) limit=255 ;;
                 ext4) limit=16 ;;
@@ -153,15 +180,18 @@ validate_volume_format() {
             require_volume_fields "$record" device fs
             ;;
     esac
+
     if [[ ${volume[subvol_action]} != none ]]; then
         [[ ${volume[fs]} == btrfs ]] || die "$record subvol_action requires btrfs"
         is_safe_relative_subvolume "${volume[subvol]:-}" || die "$record subvol is invalid"
     fi
 }
+
 validate_volume_crypto() {
     local record=$1
     local -n volume=$record
     local encryption=${volume[encryption]} credential=${volume[credential]}
+
     case $credential in
         file)
             require_volume_fields "$record" credential_file
@@ -174,8 +204,10 @@ validate_volume_crypto() {
             [[ ${volume[action]} == create && $encryption == luks-create && ${volume[recovery]} == true ]] ||
                 die "$record ephemeral credential requires recovery" ;;
     esac
+
     [[ $encryption == none && $credential != none ]] &&
         die "$record plaintext volume must use credential=none"
+
     local tpm=${volume[tpm2]} recovery=${volume[recovery]}
     is_boolean "$tpm" || die "$record tpm2 is invalid"
     is_boolean "$recovery" || die "$record recovery is invalid"
@@ -183,20 +215,24 @@ validate_volume_crypto() {
     [[ $recovery == true && $tpm != true ]] && die "$record recovery requires tpm2"
     return 0
 }
+
 validate_volume_record() {
     local record=$1
     normalize_volume_record "$record"
     local -n volume=$record
+
     case ${volume[action]} in create|retain|relation) ;; *) die "$record action is invalid" ;; esac
     case ${volume[encryption]} in none|luks-create|luks-open) ;; *) die "$record encryption is invalid" ;; esac
     case ${volume[credential]} in none|prompt|file|ephemeral|env) ;; *) die "$record credential is invalid" ;; esac
     case ${volume[subvol_action]} in none|select|create) ;; *) die "$record subvol_action is invalid" ;; esac
     case ${volume[phase]} in predeploy|postdeploy) ;; *) die "$record phase is invalid" ;; esac
+
     validate_volume_mount "$record"
     validate_volume_format "$record"
     validate_volume_mount_options "$record"
     validate_volume_crypto "$record"
     local number=${volume[partition_number]:-}
+
     if [[ ${volume[action]} == create && -n $number ]]; then
         require_volume_fields "$record" partition_size partition_type partition_label parent_disk
         [[ $number =~ ^[1-9][0-9]*$ ]] || die "$record partition_number is invalid"
@@ -210,8 +246,10 @@ validate_volume_record() {
             die "$record partition fields are only valid for created volumes"
     fi
 }
+
 validate_relation_graph() {
     local record backing walk
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == relation ]] || continue
@@ -228,9 +266,11 @@ validate_relation_graph() {
         done
     done
 }
+
 validate_volume_devices() {
     local record parent real mounted mapped key
     local -A retain_devices=() create_parents=() direct_parents=() partition_parents=()
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create ]] || continue
@@ -243,6 +283,7 @@ validate_volume_devices() {
             direct_parents[$real]=1
         fi
     done
+
     for real in "${!create_parents[@]}"; do
         [[ -b $real && $(lsblk -ndo TYPE "$real") == disk ]] ||
             die "external volume parent is not a whole disk: $real"
@@ -259,6 +300,7 @@ validate_volume_devices() {
             ;;
         esac
     done
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == retain ]] || continue
@@ -274,9 +316,11 @@ validate_volume_devices() {
         done
     done
 }
+
 validate_vol_config() {
     local record other key
     local -A paths=() names=() partitions=() labels=()
+
     record_names_valid
     for record in vol_root vol_boot vol_esp; do
         local -n core=$record
@@ -287,6 +331,7 @@ validate_vol_config() {
             *) die "$record has an invalid core layout" ;;
         esac
     done
+
     local size minimum spec
     for spec in 'vol_esp 128' 'vol_boot 512'; do
         read -r record minimum <<< "$spec"
@@ -295,6 +340,7 @@ validate_vol_config() {
         [[ $size =~ ^[0-9]+$ && $size -ge $minimum ]] ||
             die "$record partition_size must be at least $minimum MiB"
     done
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         validate_volume_record "$record"
@@ -323,29 +369,37 @@ validate_vol_config() {
             fi
         fi
     done
+
     validate_relation_graph
     validate_volume_devices
 }
+
 wait_for_device() {
     local path=$1
     local remaining=30
+
     while ((remaining-- > 0)); do
         udevadm settle; [[ -b $path ]] && return 0; sleep 1
     done; die "timed out waiting for $path"
 }
+
 vol_clear_parent() {
     local parent=$1
+
     log "Erasing storage parent $parent"; lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$parent"
     wipefs --all --force "$parent"; sgdisk --zap-all "$parent"
 }
+
 vol_prepare_partitions() {
     local record parent size resolved
     local -A parents=()
     local -a args=()
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create && -n ${volume[partition_number]:-} ]] || continue
         parent=$(readlink -f -- "${volume[parent_disk]}"); parents[$parent]=1; done
+
     for parent in "${!parents[@]}"; do
         vol_clear_parent "$parent"
         args=()
@@ -358,6 +412,7 @@ vol_prepare_partitions() {
                 "--typecode=${volume[partition_number]}:${volume[partition_type]}"
                 "--change-name=${volume[partition_number]}:${volume[partition_label]}")
         done
+
         for record in "${vol_list[@]}"; do
             local -n volume=$record
             [[ $(readlink -f -- "${volume[parent_disk]:-}") == "$parent" &&
@@ -366,8 +421,10 @@ vol_prepare_partitions() {
                 "--typecode=${volume[partition_number]}:${volume[partition_type]}"
                 "--change-name=${volume[partition_number]}:${volume[partition_label]}")
         done
+
         sgdisk "${args[@]}" "$parent"
     done
+
     udevadm settle
     for record in "${vol_list[@]}"; do
         local -n volume=$record
@@ -378,12 +435,14 @@ vol_prepare_partitions() {
             die "${volume[_partition_device]} is not on expected parent disk ${volume[parent_disk]}"
     done
 }
+
 volume_credential() {
     local output_name=$1
     local record=$2
     local -n volume=$record
     local file=''
     local variable="lvc_${volume[luks_name]:-}"
+
     case ${volume[credential]} in
         file) file=${volume[credential_file]} ;;
         env)
@@ -404,12 +463,14 @@ volume_credential() {
     esac
     printf -v "$output_name" '%s' "$file"
 }
+
 enroll_luks_credentials() {
     local record=$1
     local device=$2
     local key=$3
     local -n volume=$record
     local -a unlock=()
+
     [[ ${volume[tpm2]:-false} == true ]] || return 0
     [[ -n $key ]] && unlock+=("--unlock-key-file=$key")
     if [[ ${volume[recovery]:-false} == true ]]; then
@@ -421,16 +482,19 @@ enroll_luks_credentials() {
             die "generated recovery key did not unlock $record"
         write_recovery_key_record recovery_uuid parsed_key "$recovery_key_output_file"
     fi
+
     local -a enroll=(--tpm2-device=auto)
     [[ -n ${volume[tpm2_pcrs]:-} ]] &&
         enroll+=("--tpm2-pcrs=${volume[tpm2_pcrs]}")
     systemd-cryptenroll "${unlock[@]}" "${enroll[@]}" "$device"
 }
+
 vol_activate_luks() {
     local record=$1
     local -n volume=$record
     local device=${volume[_partition_device]:-${volume[device]}}
     local key=''
+
     volume_credential key "$record"
     local -a args=()
     if [[ ${volume[encryption]} == luks-create ]]; then
@@ -438,6 +502,7 @@ vol_activate_luks() {
         [[ -n $key ]] && args+=(--batch-mode --key-file "$key")
         cryptsetup luksFormat "${args[@]}" "$device"
     fi
+
     args=(--type luks)
     [[ -n $key ]] && args+=(--key-file "$key")
     cryptsetup open "${args[@]}" "$device" "${volume[luks_name]}"
@@ -450,10 +515,12 @@ vol_activate_luks() {
         systemd-cryptenroll --wipe-slot=password "$device"
     fi
 }
+
 vol_format_filesystem() {
     local record=$1
     local device=$2
     local -n volume=$record
+
     case ${volume[fs]} in
         btrfs) mkfs.btrfs -f -L "${volume[fs_label]}" "$device" ;;
         ext4) mkfs.ext4 -F -L "${volume[fs_label]}" "$device" ;;
@@ -462,8 +529,10 @@ vol_format_filesystem() {
         *) die "unsupported filesystem: ${volume[fs]}" ;;
     esac
 }
+
 vol_prepare_existing() {
     local record actual
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == retain ]] || continue
@@ -476,8 +545,10 @@ vol_prepare_existing() {
         fi
     done
 }
+
 vol_prepare_filesystems() {
     local record device label
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create ]] || continue
@@ -497,19 +568,23 @@ vol_prepare_filesystems() {
         case ${volume[mountpoint]} in /boot) boot_filesystem_uuid=${volume[_fs_uuid]} ;; /boot/efi) efi_filesystem_uuid=${volume[_fs_uuid]} ;; esac
     done
 }
+
 vol_mount_filesystem() {
     local source=$1
     local filesystem=$2
     local options=$3
     local target=$4
+
     mkdir -p -- "$target"
     mount -t "$filesystem" -o "$options" "$source" "$target"
 }
+
 vol_create_subvolume() {
     local source=$1
     local path=$2
     local staging=$3
     local target old_path migrated=false
+
     mkdir -p -- "$staging"
     vol_mount_filesystem "$source" btrfs subvolid=5 "$staging"
     cleanup_mounts+=("$staging")
@@ -530,19 +605,23 @@ vol_create_subvolume() {
     umount "$staging"
     unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
 }
+
 vol_mount_options() {
     local output_name=$1
     local record=$2
     local -n volume=$record
     local computed_options=${volume[mount_options]:-defaults}
+
     if [[ ${volume[subvol_action]:-none} != none ]]; then
         case ",$computed_options," in *,subvol=*, | *,subvolid=*,) ;; *) computed_options="$computed_options,subvol=${volume[subvol]}" ;; esac
     fi
     printf -v "$output_name" '%s' "$computed_options"
 }
+
 volume_phase_order() {
     local phase=$1 path slashes
     local record
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[phase]:-predeploy} == "$phase" ]] || continue
@@ -553,10 +632,12 @@ volume_phase_order() {
     done |
         sort -n -k1,1 -k2,2 | cut -f2-
 }
+
 vol_mount_phase() {
     local phase=$1
     local record options target
     local -a order=()
+
     mapfile -t order < <(volume_phase_order "$phase")
     for record in "${order[@]}"; do
         local -n volume=$record
@@ -564,8 +645,10 @@ vol_mount_phase() {
         vol_mount_filesystem "${volume[_source]}" "${volume[fs]}" "$options" "$target"; cleanup_mounts+=("$target")
     done
 }
+
 vol_prepare_storage() {
     local record backing rounds unresolved
+
     vol_prepare_existing
     vol_prepare_partitions
     vol_prepare_filesystems

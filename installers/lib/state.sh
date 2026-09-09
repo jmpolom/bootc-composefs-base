@@ -78,6 +78,7 @@ vol_prepare_targets() {
     local config_root=$1
     local persistent_var=$2
     local record mount_point target_path
+
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[phase]:-predeploy} == postdeploy ]] || continue
@@ -99,6 +100,7 @@ vol_migrate_mounts() {
     local -a order=()
 
     mapfile -t order < <(volume_phase_order postdeploy)
+
     for record in "${order[@]}"; do
         local -n volume=$record
         filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
@@ -135,6 +137,7 @@ vol_migrate_mounts() {
 configure_first_user() {
     local config_root=$1
     local persistent_var=$2
+
     [[ -n ${user_name:-} ]] || return 0
 
     [[ -f $config_root/etc/passwd ]] || die "target passwd file is missing"
