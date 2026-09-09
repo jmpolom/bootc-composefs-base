@@ -14,7 +14,8 @@ reject_short_list() {
     vol_list=(vol_root vol_boot)
     record_names_valid
 }
-target_disk=/dev/mock-target
+target_disk=$(mktemp)
+target_disk_real=$(command readlink -f -- "$target_disk")
 physical_var_path=/state/os/default/var
 vol_list=(vol_root vol_boot vol_esp vol_data)
 declare -A vol_root=([action]=create [parent_disk]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create [phase]=predeploy)
@@ -22,6 +23,26 @@ declare -A vol_boot=([action]=create [parent_disk]=$target_disk [partition_numbe
 declare -A vol_esp=([action]=create [parent_disk]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
 declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=postdeploy)
 record_names_valid
+
+# Partition creation keeps the required root-first vol_list order while placing
+# the remainder partition after all fixed-size partitions in the sgdisk call.
+partition_args=()
+vol_clear_parent() { :; }
+sgdisk() { partition_args=("$@"); }
+udevadm() { :; }
+wait_for_device() { :; }
+readlink() {
+    if [[ ${1:-} == -f && ${3:-} == /dev/disk/by-partlabel/* ]]; then
+        printf '%s\n' "$target_disk_real"
+    else
+        command readlink "$@"
+    fi
+}
+lsblk() { printf '%s\n' "$(readlink -f -- "$target_disk")"; }
+vol_prepare_partitions
+assert_eq "--new=2:0:+1024MiB --typecode=2:guid --change-name=2:boot --new=1:0:+600MiB --typecode=1:guid --change-name=1:boot_efi --new=3:0:0 --typecode=3:guid --change-name=3:root $target_disk_real" \
+    "${partition_args[*]}" 'sgdisk fixed-size partitions precede remainder'
+rm -f -- "$target_disk"
 
 minimum_size_root=$(mktemp -d)
 minimum_size_target=$minimum_size_root/target

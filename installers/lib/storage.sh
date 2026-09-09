@@ -350,13 +350,24 @@ vol_prepare_partitions() {
         vol_clear_parent "$parent"
         args=()
         for record in "${vol_list[@]}"; do
-        local -n volume=$record
+            local -n volume=$record
             [[ $(readlink -f -- "${volume[parent_disk]:-}") == "$parent" &&
-                -n ${volume[partition_number]:-} ]] || continue
+                -n ${volume[partition_number]:-} && ${volume[partition_size]} != remainder ]] || continue
             size=${volume[partition_size]}
-            [[ $size == remainder ]] && args+=("--new=${volume[partition_number]}:0:0") || args+=("--new=${volume[partition_number]}:0:+${size}MiB")
-            args+=("--typecode=${volume[partition_number]}:${volume[partition_type]}" "--change-name=${volume[partition_number]}:${volume[partition_label]}")
-        done; sgdisk "${args[@]}" "$parent"; done
+            args+=("--new=${volume[partition_number]}:0:+${size}MiB"
+                "--typecode=${volume[partition_number]}:${volume[partition_type]}"
+                "--change-name=${volume[partition_number]}:${volume[partition_label]}")
+        done
+        for record in "${vol_list[@]}"; do
+            local -n volume=$record
+            [[ $(readlink -f -- "${volume[parent_disk]:-}") == "$parent" &&
+                -n ${volume[partition_number]:-} && ${volume[partition_size]} == remainder ]] || continue
+            args+=("--new=${volume[partition_number]}:0:0"
+                "--typecode=${volume[partition_number]}:${volume[partition_type]}"
+                "--change-name=${volume[partition_number]}:${volume[partition_label]}")
+        done
+        sgdisk "${args[@]}" "$parent"
+    done
     udevadm settle
     for record in "${vol_list[@]}"; do
         local -n volume=$record
