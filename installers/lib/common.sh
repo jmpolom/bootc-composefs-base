@@ -59,6 +59,7 @@ parse_options() {
     # The configuration is intentionally a shell environment file and is trusted code.
     # shellcheck source=/dev/null
     source "$config_arg"
+    promote_config_records
     # Keep the exact CLI-supplied path for preflight alias checks.  Set this after
     # sourcing so a configuration setting cannot replace the trusted value.
     installer_config_file=$config_arg
@@ -68,28 +69,45 @@ parse_options() {
     fi
 }
 
+# `source` inside a function makes `declare -A` records local. Copy their values
+# into globals without evaluating the output of `declare -p` as shell code.
+promote_config_records() {
+    local record key
+    local -a configured_records=() keys=() values=()
+
+    [[ $(declare -p vol_list 2>/dev/null) == 'declare -a '* ]] ||
+        die 'vol_list must be declared as an indexed array'
+    configured_records=("${vol_list[@]}")
+    unset vol_list
+    declare -g -a vol_list=()
+    vol_list=("${configured_records[@]}")
+    for record in "${configured_records[@]}"; do
+        [[ $record =~ ^vol_[a-zA-Z_][a-zA-Z0-9_]*$ ]] ||
+            die "invalid volume record name: $record"
+        [[ $(declare -p "$record" 2>/dev/null) == 'declare -A '* ]] ||
+            die "$record must be declared as an associative array"
+        local -n source_record=$record
+        keys=() values=()
+        for key in "${!source_record[@]}"; do
+            keys+=("$key")
+            values+=("${source_record[$key]}")
+        done
+        unset "$record"
+        declare -g -A "$record"
+        local -n destination=$record
+        for ((key = 0; key < ${#keys[@]}; key++)); do
+            destination["${keys[$key]}"]=${values[$key]}
+        done
+    done
+}
+
 set_defaults() {
-    root_fs_label=${root_fs_label:-root}
-    root_subvol=${root_subvol:-root}
-    root_partition_label=${root_partition_label:-root}
-    root_luks_label=${root_luks_label:-root_luks}
-    root_encrypted=${root_encrypted:-false}
-    root_tpm2=${root_tpm2:-false}
-    root_tpm2_pcrs=${root_tpm2_pcrs:-}
-    root_tpm2_recovery=${root_tpm2_recovery:-false}
-    luks_ephemeral_key=${luks_ephemeral_key:-false}
-    luks_password_file=${luks_password_file:-}
     recovery_key_output_file=${recovery_key_output_file:-}
     separate_var=${separate_var:-false}
     separate_home=${separate_home:-false}
     separate_opt=${separate_opt:-false}
-    efi_size_mib=${efi_size_mib:-600}
-    boot_size_mib=${boot_size_mib:-1024}
     install_root=${install_root:-/mnt/bootc-install}
     work_root=${work_root:-/run/bootc-installer}
-    luks_name=${luks_name:-root}
-    root_mount_options=${root_mount_options:-compress=zstd,noatime}
-    state_mount_options=${state_mount_options:-compress=zstd,noatime}
     user_shell=${user_shell:-/bin/bash}
     user_gecos=${user_gecos:-}
     rust_log=${rust_log:-info}
@@ -97,17 +115,6 @@ set_defaults() {
     target_imgref=${target_imgref:-}
 
     ensure_indexed_array extra_kargs
-    ensure_indexed_array ext_vol_devices
-    ensure_indexed_array ext_vol_mountpoint
-    ensure_indexed_array ext_vol_fs
-    ensure_indexed_array ext_vol_luks
-    ensure_indexed_array ext_vol_opts
-    ensure_indexed_array ext_vol_tpm
-    ensure_indexed_array ext_vol_tpm_pcrs
-    ensure_indexed_array ext_vol_recovery
-    ensure_indexed_array ext_vol_existing
-    ensure_indexed_array ext_vol_subvol
-    ensure_indexed_array ext_vol_subvol_create
 }
 
 ensure_indexed_array() {
@@ -234,7 +241,7 @@ validate_recovery_output_aliases() {
         die "recovery_key_output_file must not alias the configuration file: $output"
     fi
     if [[ -n $password_file ]] && paths_alias "$output" "$password_file"; then
-        die "recovery_key_output_file must not alias luks_password_file: $output"
+        die "recovery_key_output_file must not alias a volume credential file: $output"
     fi
 }
 
@@ -295,38 +302,8 @@ validate_common_config() {
     require_full_capabilities
     [[ -n ${target_disk:-} ]] || die "target_disk is required"
     [[ $target_disk == /dev/disk/by-* ]] || die "target_disk must use a /dev/disk/by-* path"
-    [[ $luks_name =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "luks_name must be lower case and path-safe"
-    validate_created_mount_options "$root_mount_options" btrfs root_mount_options
-    [[ $state_mount_options != *:* ]] || die "state_mount_options cannot contain ':'"
-    validate_created_mount_options "$state_mount_options" btrfs state_mount_options
-    [[ $efi_size_mib =~ ^[0-9]+$ && $efi_size_mib -ge 128 ]] || die "efi_size_mib must be at least 128"
-    [[ $boot_size_mib =~ ^[0-9]+$ && $boot_size_mib -ge 512 ]] || die "boot_size_mib must be at least 512"
-    # Resolve and validate the root partition type before any storage operation.
-    root_partition_guid >/dev/null
     validate_work_root
     validate_var_tmp
-
-    local setting
-    for setting in root_encrypted root_tpm2 root_tpm2_recovery luks_ephemeral_key; do
-        is_boolean "${!setting}" || die "$setting must be true or false"
-    done
-
-    [[ ! ($luks_ephemeral_key == true && -n $luks_password_file) ]] ||
-        die "luks_ephemeral_key and luks_password_file are mutually exclusive"
-    if [[ -n $luks_password_file ]]; then
-        [[ -f $luks_password_file && -r $luks_password_file ]] ||
-            die "luks_password_file is not a readable regular file: $luks_password_file"
-    fi
-
-    [[ $root_tpm2_pcrs != *$'\n'* ]] || die "root_tpm2_pcrs cannot contain a newline"
-    if [[ $root_tpm2 == true ]]; then
-        [[ $root_encrypted == true ]] || die "root_tpm2 requires root_encrypted=true"
-        tpm_enrollment_requested=true
-    elif [[ $root_tpm2_recovery == true ]]; then
-        die "root_tpm2_recovery requires root_tpm2=true"
-    elif [[ -n $root_tpm2_pcrs ]]; then
-        die "root_tpm2_pcrs requires root_tpm2=true"
-    fi
 
     if [[ -n ${user_name:-} ]]; then
         [[ $user_name =~ ^[a-z_][a-z0-9_-]*$ ]] || die "user_name is invalid"
@@ -344,37 +321,48 @@ validate_common_config() {
     [[ -z $mounted_path ]] || die "target disk has a mounted filesystem at $mounted_path"
     active_type=$(lsblk -nrpo TYPE "$target_disk_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
     [[ -z $active_type ]] || die "target disk has an active mapped descendant of type $active_type"
-    disk_size=$(lsblk -bdno SIZE "$target_disk_real")
-    minimum_size=$(((efi_size_mib + boot_size_mib + 2048) * 1024 * 1024))
-    ((disk_size >= minimum_size)) || die "target disk is too small for the requested layout"
-
     require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
-        dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sync udevadm umount \
+        dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sort cut sync udevadm umount \
         touch useradd usermod wipefs
     validate_vol_config
 
-    local recovery_requested=$root_tpm2_recovery
-    local index
-    for index in "${!vol_role[@]}"; do
-        [[ ${vol_role[$index]} == ext ]] || continue
-        if [[ ${vol_recovery[$index]:-false} == true ]]; then
-            recovery_requested=true
-        fi
-        if [[ $luks_ephemeral_key == true && ${vol_existing[$index]:-false} == false && \
-              -n ${vol_luks[$index]:-} && \
-              ${vol_recovery[$index]:-false} != true ]]; then
-            die "luks_ephemeral_key requires a recovery key for encrypted external volume: ${vol_mountpoint[$index]}"
+    local need_xfs=false record disk_size minimum_size partition_size parent_real
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[action]} == create && ${volume[fs]} == xfs ]] && need_xfs=true
+    done
+    [[ $need_xfs == true ]] && require_commands mkfs.xfs
+
+    disk_size=$(lsblk -bdno SIZE "$target_disk_real")
+    minimum_size=$((2048 * 1024 * 1024))
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        partition_size=${volume[partition_size]}
+        parent_real=
+        [[ -n ${volume[parent_disk]:-} ]] && parent_real=$(readlink -f -- "${volume[parent_disk]}")
+        [[ ${volume[action]} == create && $parent_real == "$target_disk_real" &&
+            $partition_size =~ ^[0-9]+$ ]] &&
+            minimum_size=$((minimum_size + partition_size * 1024 * 1024))
+    done
+    ((disk_size >= minimum_size)) ||
+        die "target disk is too small for the configured layout"
+
+    local recovery_requested=false record
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[recovery]:-false} == true ]] && recovery_requested=true
+        [[ ${volume[tpm2]:-false} == true ]] && tpm_enrollment_requested=true
+        if [[ ${volume[recovery]:-false} == true && ${volume[credential]:-none} == file ]]; then
+            validate_recovery_output_aliases "$recovery_key_output_file" \
+                "$installer_config_file" "${volume[credential_file]}"
         fi
     done
-    if [[ $luks_ephemeral_key == true && $root_encrypted == true && $root_tpm2_recovery != true ]]; then
-        die "luks_ephemeral_key requires root_tpm2_recovery=true for encrypted root"
-    fi
     if [[ $recovery_requested == true ]]; then
         [[ -n $recovery_key_output_file ]] ||
             die "recovery_key_output_file is required when recovery enrollment is enabled"
         validate_recovery_output_target "$recovery_key_output_file"
         validate_recovery_output_aliases "$recovery_key_output_file" \
-            "$installer_config_file" "$luks_password_file"
+            "$installer_config_file"
     fi
     recovery_enrollment_requested=$recovery_requested
     if [[ $tpm_enrollment_requested == true ]]; then
@@ -385,34 +373,20 @@ validate_common_config() {
 append_common_kargs() {
     local physical_var_path=$1
     local root_setup_unit=$2
-    local root_mount_spec='' root_mount_options_for_kargs='' index
-    for index in "${!vol_role[@]}"; do
-        [[ ${vol_mountpoint[$index]} == / ]] || continue
-        root_mount_spec=${vol_source_resolved[$index]:-}
-        vol_mount_options root_mount_options_for_kargs "$index"
-        break
-    done
+    local root_mount_spec='' root_opts_for_kargs='' record
+    local -n root=vol_root
+    root_mount_spec=${root[_source]:-}
+    vol_mount_options root_opts_for_kargs vol_root
     [[ -n $root_mount_spec ]] || die 'normalized root volume source is unavailable'
 
     bootc_args+=(
         "--root-mount-spec=$root_mount_spec"
         "--boot-mount-spec=UUID=$boot_filesystem_uuid"
         "--karg=rootfstype=btrfs"
-        "--karg=rootflags=$root_mount_options_for_kargs"
+        "--karg=rootflags=$root_opts_for_kargs"
     )
 
-    local root_luks_uuid_for_kargs='' root_luks_name_for_kargs='' root_luks_tpm_for_kargs=false
-    for index in "${!vol_role[@]}"; do
-        if [[ ${vol_mountpoint[$index]} == / ]]; then
-            root_luks_uuid_for_kargs=${vol_luks_uuid_resolved[$index]:-}
-            root_luks_name_for_kargs=${vol_luks[$index]:-}
-            root_luks_tpm_for_kargs=${vol_tpm[$index]:-false}
-            break
-        fi
-    done
-    if [[ $root_encrypted == true ]]; then
-        append_volume_luks_kargs "$root_luks_uuid_for_kargs" "$root_luks_name_for_kargs" "$root_luks_tpm_for_kargs"
-    fi
+    append_volume_luks_kargs "${root[_luks_uuid]:-}" "${root[luks_name]:-}" "${root[tpm2]:-false}"
 
     local karg
     for karg in "${extra_kargs[@]}"; do
@@ -420,12 +394,10 @@ append_common_kargs() {
     done
 
     local source filesystem options mount_point uuid luks_name
-    for index in "${!vol_role[@]}"; do
-        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
-        source=${vol_source_resolved[$index]:-}
-        filesystem=${vol_fs[$index]}
-        vol_mount_options options "$index"
-        mount_point=${vol_mountpoint[$index]}
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[phase]:-predeploy} == postdeploy ]] || continue
+        source=${volume[_source]:-}; filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
         if [[ $mount_point == /var ]]; then
             append_external_var_karg "$source" "$filesystem" "$options"
@@ -433,10 +405,9 @@ append_common_kargs() {
             bootc_args+=("--karg=systemd.mount-extra=${source}:${mount_point}:${filesystem}:${options}")
         fi
 
-        uuid=${vol_luks_uuid_resolved[$index]:-}
+        uuid=${volume[_luks_uuid]:-}
         if [[ -n $uuid ]]; then
-            luks_name=${vol_luks[$index]}
-            append_volume_luks_kargs "$uuid" "$luks_name" "${vol_tpm[$index]:-false}"
+            luks_name=${volume[luks_name]}; append_volume_luks_kargs "$uuid" "$luks_name" "${volume[tpm2]:-false}"
         fi
     done
 }
@@ -489,13 +460,6 @@ cleanup() {
     done
 
     local key_file
-    for key_file in "${temporary_luks_key_files[@]}"; do
-        if [[ -n $key_file ]] && ! rm -f -- "$key_file"; then
-            printf 'Cleanup failed to remove temporary key %s\n' "$key_file" >&2
-            cleanup_status=1
-        fi
-    done
-
     for key_file in "${temporary_credential_files[@]}"; do
         if [[ -n $key_file ]] && ! rm -f -- "$key_file"; then
             printf 'Cleanup failed to remove temporary credential %s\n' "$key_file" >&2
@@ -532,7 +496,7 @@ run_installer() {
     parse_options "$@"
     set_defaults
     backend_callback set_defaults
-    normalize_ext_vol_shortcuts
+    normalize_volume_shortcuts
     validate_common_config
     backend_callback preflight
 

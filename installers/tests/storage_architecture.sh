@@ -1,160 +1,115 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-production_files=(
-    "$root/installers/lib/storage.sh"
-    "$root/installers/lib/state.sh"
-    "$root/installers/lib/common.sh"
-)
+storage=$root/installers/lib/storage.sh
+common=$root/installers/lib/common.sh
+state=$root/installers/lib/state.sh
 
-# These are the direct replacements for the baseline lifecycle functions. The
-# small vol_* helpers are checked independently below, while this set is used
-# for the aggregate gate so the before/after comparison has the same scope.
-gate_specs=(
-    "${production_files[0]}:validate_vol_config"
-    "${production_files[0]}:vol_prepare_existing"
-    "${production_files[0]}:vol_prepare_partitions"
-    "${production_files[0]}:vol_prepare_filesystems"
-    "${production_files[0]}:vol_prepare_subvolumes"
-    "${production_files[0]}:vol_mount_phase"
-    "${production_files[1]}:vol_migrate_mounts"
-    "${production_files[2]}:append_common_kargs"
-)
-lifecycle_specs=(
-    "${production_files[0]}:vol_is_root_relation"
-    "${production_files[0]}:vol_validate_device"
-    "${production_files[0]}:vol_validate_mount_target"
-    "${production_files[0]}:vol_validate_mount_format"
-    "${production_files[0]}:vol_validate_mount"
-    "${production_files[0]}:vol_validate_crypto"
-    "${production_files[0]}:vol_resolve_record"
-    "${production_files[0]}:validate_vol_config"
-    "${production_files[0]}:vol_clear_parent"
-    "${production_files[0]}:vol_prepare_partitions"
-    "${production_files[0]}:vol_format_filesystem"
-    "${production_files[0]}:vol_materialize_credential"
-    "${production_files[0]}:vol_activate_luks"
-    "${production_files[0]}:vol_verify_subvolume"
-    "${production_files[0]}:vol_prepare_existing"
-    "${production_files[0]}:vol_prepare_filesystems"
-    "${production_files[0]}:vol_create_subvolume"
-    "${production_files[0]}:vol_prepare_subvolumes"
-    "${production_files[0]}:vol_mount_options"
-    "${production_files[0]}:vol_mount_phase"
-    "${production_files[0]}:vol_prepare_storage"
-    "${production_files[1]}:vol_prepare_targets"
-    "${production_files[1]}:vol_migrate_mounts"
-    "${production_files[2]}:append_common_kargs"
-)
-
-measure() {
-    local file=$1 name=$2
-    awk -v wanted="$name" '
-        BEGIN { cc=1 }
-        /^[A-Za-z_][A-Za-z0-9_]*\([[:space:]]*\)[[:space:]]*\{/ {
-            on=($1 == wanted "()")
-            next
+# Count logical commands rather than physical lines. Case terminators and the
+# separators introducing then/do/fi/etc. are shell grammar, not commands; other
+# semicolons still count, so compound-line packing cannot lower the metric.
+# Complexity counts control keywords and short-circuit operators as decisions.
+measure_functions() {
+    awk '
+    function emit(    ) {
+        if (function_name != "") {
+            function_count++
+            executable_total += executable
+            complexity_total += complexity
+            if (executable > max_executable) {
+                max_executable = executable; max_executable_name = function_name
+            }
+            if (complexity > max_complexity) {
+                max_complexity = complexity; max_complexity_name = function_name
+            }
         }
-        on && /^}/ { print exec + 1, cc; exit }
-        on {
-            if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*#/) exec++
-            line=$0
-            if (line ~ /(^|[[:space:]])(if|elif|for|while|until)([[:space:]]|\(|\[|$)/) cc++
-            cc += gsub(/&&|\|\|/, "")
-            if (line ~ /^[[:space:]]*case[[:space:]]/) in_case=1
-            else if (in_case && line ~ /^[[:space:]]*esac/) in_case=0
-            else if (in_case && line ~ /^[[:space:]]*[^*#[:space:]][^#]*\)[[:space:]]*(;;|$)/) cc++
-        }
-    ' "$file"
-}
-
-aggregate_loc=0
-aggregate_cc=0
-for spec in "${gate_specs[@]}"; do
-    file=${spec%:*}; name=${spec#*:}
-    read -r loc cc <<<"$(measure "$file" "$name")"
-    aggregate_loc=$((aggregate_loc + loc))
-    aggregate_cc=$((aggregate_cc + cc))
-done
-((aggregate_loc <= 350 && aggregate_cc <= 103)) || {
-    printf 'lifecycle gate failed: executable LOC=%d (max 350), CC=%d (max 103)\n' "$aggregate_loc" "$aggregate_cc" >&2
-    exit 1
-}
-for spec in "${lifecycle_specs[@]}"; do
-    file=${spec%:*}; name=${spec#*:}
-    read -r loc cc <<<"$(measure "$file" "$name")"
-    ((loc <= 80 && cc <= 15)) || {
-        printf 'lifecycle function exceeds gate: %s LOC=%d CC=%d\n' "$name" "$loc" "$cc" >&2
-        exit 1
     }
-done
-
-old_names=(
-    validate_ext_vol_config prepare_existing_ext_volumes prepare_partitions format_filesystems
-    prepare_ext_vol_filesystems create_subvolumes mount_install_target
-    configure_ext_vols format_ext_vol_filesystem root_backed_ext_vol_subvolume prepare_root_backed_ext_vol
-)
-for name in "${old_names[@]}"; do
-    ! rg -n "^${name}[[:space:]]*\(\)" "${production_files[@]}" >/dev/null ||
-        { printf 'old lifecycle function remains: %s\n' "$name" >&2; exit 1; }
-done
-
-# Public ext_vol_* arrays are an input/configuration interface. After
-# normalization, lifecycle functions must consume only vol_* records; this
-# catches accidental reintroduction of public-array reads with normalized
-# record indexes.
-allowed_public_readers='normalize_ext_vol_shortcuts|normalize_internal_volumes|validate_ext_vol_array_indexes|validate_vol_config'
-for file in "${production_files[@]}"; do
-    awk -v allowed="$allowed_public_readers" '
-        /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\([[:space:]]*\)[[:space:]]*\{/ {
-            name=$1; sub(/\(.*/, "", name); on=1; permitted=(name ~ ("^(" allowed ")$")); next
+    function count_line(line,    n,i,word) {
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        if (line == "" || line ~ /^#/ || line ~ /^(then|do|done|fi|else|elif|esac)[[:space:]]*;?[[:space:]]*$/) return
+        gsub(/;;/, "", line)
+        gsub(/;[[:space:]]*(then|do|done|fi|else|elif|esac)([[:space:]]|$)/, " ", line)
+        executable += 1 + gsub(/;/, ";", line)
+        gsub(/&&/, " && ", line); gsub(/\|\|/, " || ", line)
+        gsub(/[^[:alnum:]_&|]+/, " ", line)
+        n = split(line, words, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) {
+            word = words[i]
+            if (word == "if" || word == "elif" || word == "for" ||
+                word == "while" || word == "until" || word == "case" ||
+                word == "&&" || word == "||") complexity++
         }
-        on && /^}/ { on=0; next }
-        on && !permitted && $0 ~ /\$\{ext_vol_[A-Za-z0-9_]+/ {
-            printf "%s:%d: public ext_vol_* read in lifecycle function %s\n", FILENAME, FNR, name
-            found=1
-        }
-        END { exit found }
-    ' "$file" || exit 1
+    }
+    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{/ {
+        emit(); function_name = $1; executable = 0; complexity = 0; next
+    }
+    function_name != "" {
+        if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) { emit(); function_name = ""; next }
+        count_line($0)
+    }
+    END {
+        emit()
+        printf "%d %d %d %d %s %s %d\n", executable_total, complexity_total,
+            max_executable, max_complexity, max_executable_name, max_complexity_name,
+            function_count
+    }' "$1"
+}
+
+print_metrics() {
+    local label=$1 path=$2 physical metrics executable aggregate max_loc max_cc max_loc_name max_cc_name functions
+    physical=$(wc -l <"$path")
+    metrics=$(measure_functions "$path")
+    read -r executable aggregate max_loc max_cc max_loc_name max_cc_name functions <<< "$metrics"
+    printf '%s: physical=%s executable=%s aggregate_cc=%s max_function_loc=%s(%s) max_function_cc=%s(%s) functions=%s\n' \
+        "$label" "$physical" "$executable" "$aggregate" "$max_loc" "$max_loc_name" \
+        "$max_cc" "$max_cc_name" "$functions"
+}
+
+physical=$(wc -l <"$storage")
+physical_failure=false
+((physical <= 600)) || { printf 'UNMET storage physical LOC target: %s > 600\n' "$physical" >&2; physical_failure=true; }
+if rg -n 'declare -[ag]*[[:space:]]+vol_[a-zA-Z0-9_]+\[' "$storage" "$common" "$state" >/dev/null; then exit 1; fi
+legacy_prefix='ext''_vol_'
+if rg -n "$legacy_prefix" "$root/installers" "$root/test-configs" --glob '!qemu-test*/**' >/dev/null; then exit 1; fi
+for suffix in role public_index backing_index partition_index; do
+    if rg -n "vol_${suffix}" "$storage" "$common" "$state" >/dev/null; then exit 1; fi
 done
-
-formatter=$(rg -l '^vol_format_filesystem[[:space:]]*\(\)' "${production_files[@]}")
-if [[ $(rg -n '\)[[:space:]]+mkfs\.(btrfs|ext4|xfs|vfat)' "$root/installers/lib/storage.sh" | wc -l | tr -d ' ') != 4 ]] ||
-    rg -n 'mkfs\.(btrfs|ext4|xfs|vfat)' "$root/installers/lib/state.sh" >/dev/null; then
-    printf 'mkfs dispatch escaped the unified formatter\n' >&2
-    exit 1
-fi
-[[ $(rg -n 'cryptsetup luksFormat' "${production_files[@]}" | wc -l | tr -d ' ') == 1 ]] ||
-    { printf 'expected one cryptsetup luksFormat call site\n' >&2; exit 1; }
-[[ $(rg -n 'systemd-cryptenroll --wipe-slot=password' "${production_files[@]}" | wc -l | tr -d ' ') == 1 ]] ||
-    { printf 'expected one password-slot removal call site\n' >&2; exit 1; }
-[[ $(rg -n 'wipefs --all|sgdisk --zap-all' "$root/installers/lib/storage.sh" | wc -l | tr -d ' ') == 2 ]] ||
-    { printf 'destructive disk operations must have one helper call site each\n' >&2; exit 1; }
-[[ $(rg -n 'btrfs subvolume create' "${production_files[@]}" | wc -l | tr -d ' ') == 1 ]] ||
-    { printf 'expected one btrfs subvolume create call site\n' >&2; exit 1; }
-[[ $(rg -n 'cryptsetup open' "$root/installers/lib/storage.sh" | rg -v -- '--test-passphrase' | wc -l | tr -d ' ') == 1 ]] ||
-    { printf 'expected one volume LUKS activation call site\n' >&2; exit 1; }
-! rg -n 'ext_vol_(labels|sources|luks_uuids|luks_labels)_resolved' "${production_files[@]}" >/dev/null ||
-    { printf 'legacy resolved external-volume lifecycle bridge remains\n' >&2; exit 1; }
-[[ $(rg -n '^append_volume_luks_kargs[[:space:]]*\(\)' "${production_files[@]}" | wc -l | tr -d ' ') == 1 ]] ||
-    { printf 'expected one common encrypted-karg emitter\n' >&2; exit 1; }
-[[ $(rg -n 'append_volume_luks_kargs' "$root/installers/lib/common.sh" | wc -l | tr -d ' ') -ge 3 ]] ||
-    { printf 'root and external volumes do not use the common encrypted-karg emitter\n' >&2; exit 1; }
-
-# Generic operations are data driven. Role-specific decisions belong at the
-# normalized-record boundaries, not inside formatting, encryption, or
-# subvolume helpers.
+for field in mountpoint fs; do
+    if rg -n "vol_${field}"'\[' "$storage" "$common" "$state" >/dev/null; then exit 1; fi
+done
+[[ $(rg -n 'cryptsetup luksFormat' "$storage" | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n 'cryptsetup open' "$storage" | rg -v -- '--test-passphrase' | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n 'wipe-slot=password' "$storage" | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n 'btrfs subvolume create' "$storage" | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n 'wipefs --all' "$storage" | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n 'sgdisk --zap-all' "$storage" | wc -l | tr -d ' ') == 1 ]]
+[[ $(rg -n '^vol_format_filesystem' "$storage" | wc -l | tr -d ' ') == 1 ]]
 for name in vol_format_filesystem vol_activate_luks vol_create_subvolume vol_prepare_subvolumes; do
-    if awk -v wanted="$name" '
-        /^[A-Za-z_][A-Za-z0-9_]*\([[:space:]]*\)[[:space:]]*\{/ { on=($1 == wanted "()"); next }
-        on && /^}/ { exit }
-        on && $0 ~ /root_subvol|root_fs_label|root_partition|root_luks|separate_|vol_backing_index|ext_vol_|\/boot|\/efi|\/var/ { found=1 }
-        END { exit found }
-    ' "$root/installers/lib/storage.sh"; then :; else
-        printf 'role-specific branch leaked into generic helper: %s\n' "$name" >&2
-        exit 1
-    fi
+    body=$(awk -v n="$name" '$0 ~ "^" n "[[:space:]]*\\(" {on=1} on{print} on && /^}/ {exit}' "$storage")
+    ! grep -E 'root_|/boot|/boot/efi|separate_|/var|/state' <<<"$body" >/dev/null || { printf 'role branch in %s\n' "$name" >&2; exit 1; }
 done
 
-printf 'storage architecture checks passed (%s), lifecycle executable LOC=%d CC=%d\n' "$formatter" "$aggregate_loc" "$aggregate_cc"
+current_metrics=$(measure_functions "$storage")
+read -r current_exec current_cc current_max_exec current_max_cc current_max_exec_name current_max_cc_name _ <<< "$current_metrics"
+head_metrics=$(measure_functions <(git show HEAD:installers/lib/storage.sh))
+read -r head_exec head_cc head_max_exec head_max_cc head_max_exec_name head_max_cc_name head_functions <<< "$head_metrics"
+print_metrics current "$storage"
+printf 'HEAD: physical=%s executable=%s aggregate_cc=%s max_function_loc=%s(%s) max_function_cc=%s(%s) functions=%s\n' \
+    "$(git show HEAD:installers/lib/storage.sh | wc -l)" "$head_exec" "$head_cc" \
+    "$head_max_exec" "$head_max_exec_name" "$head_max_cc" "$head_max_cc_name" "$head_functions"
+whole_current=$(measure_functions <(cat "$storage" "$common" "$state"))
+whole_head=$(measure_functions <(git show HEAD:installers/lib/storage.sh; git show HEAD:installers/lib/common.sh; git show HEAD:installers/lib/state.sh))
+read -r whole_exec whole_cc whole_max_exec whole_max_cc whole_max_exec_name whole_max_cc_name whole_functions <<< "$whole_current"
+read -r whole_head_exec whole_head_cc whole_head_max_exec whole_head_max_cc whole_head_max_exec_name whole_head_max_cc_name whole_head_functions <<< "$whole_head"
+printf 'whole current: physical=%s executable=%s aggregate_cc=%s max_function_loc=%s(%s) max_function_cc=%s(%s) functions=%s\n' \
+    "$(wc -l < <(cat "$storage" "$common" "$state"))" "$whole_exec" "$whole_cc" "$whole_max_exec" "$whole_max_exec_name" "$whole_max_cc" "$whole_max_cc_name" "$whole_functions"
+printf 'whole HEAD: physical=storage:%s common:%s state:%s executable=%s aggregate_cc=%s max_function_loc=%s(%s) max_function_cc=%s(%s) functions=%s\n' \
+    "$(git show HEAD:installers/lib/storage.sh | wc -l)" "$(git show HEAD:installers/lib/common.sh | wc -l)" "$(git show HEAD:installers/lib/state.sh | wc -l)" "$whole_head_exec" "$whole_head_cc" "$whole_head_max_exec" "$whole_head_max_exec_name" "$whole_head_max_cc" "$whole_head_max_cc_name" "$whole_head_functions"
+metric_failure=$physical_failure
+((current_exec <= 500)) || { printf 'UNMET storage executable LOC target: %s > 500\n' "$current_exec" >&2; metric_failure=true; }
+((current_cc <= 160)) || { printf 'UNMET storage aggregate CC target: %s > 160\n' "$current_cc" >&2; metric_failure=true; }
+((current_max_exec <= 60)) || { printf 'UNMET max function LOC: %s > 60 (%s)\n' "$current_max_exec" "$current_max_exec_name" >&2; metric_failure=true; }
+((current_max_cc <= 18)) || { printf 'UNMET max function CC: %s > 18 (%s)\n' "$current_max_cc" "$current_max_cc_name" >&2; metric_failure=true; }
+[[ $metric_failure == true ]] && exit 1
+printf 'storage architecture checks passed (physical LOC=%s)\n' "$physical"

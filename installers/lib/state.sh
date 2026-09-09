@@ -77,11 +77,11 @@ prepare_mount_target() {
 vol_prepare_targets() {
     local config_root=$1
     local persistent_var=$2
-    local index mount_point target_path
-
-    for index in "${!vol_role[@]}"; do
-        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
-        mount_point=${vol_mountpoint[$index]}
+    local record mount_point target_path
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[phase]:-predeploy} == postdeploy ]] || continue
+        mount_point=${volume[mountpoint]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
         prepare_mount_target "$mount_point" "$target_path"
     done
@@ -95,31 +95,27 @@ clear_directory() {
 vol_migrate_mounts() {
     local config_root=$1
     local persistent_var=$2
-    local index filesystem options mount_point target_path source staging relation_path relation_suffix
-    for index in "${!vol_role[@]}"; do
-        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
-        filesystem=${vol_fs[$index]}
-        vol_mount_options options "$index"
-        mount_point=${vol_mountpoint[$index]}
+    local record filesystem options mount_point target_path source staging
+    local -a order=()
+
+    mapfile -t order < <(volume_phase_order postdeploy)
+    for record in "${order[@]}"; do
+        local -n volume=$record
+        filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
-        source=${vol_source_resolved[$index]:-}
+        source=${volume[_source]:-}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
-        if [[ ${vol_backing_index[$index]:-} == 2 ]]; then
-            relation_path=
-            if [[ ${vol_subvol[$index]} == "$root_subvol" ]]; then
-                relation_path=$install_root
-            elif [[ ${vol_subvol[$index]} == "$root_subvol"/* ]]; then
-                relation_suffix=${vol_subvol[$index]#"$root_subvol"/}
-                relation_path=$install_root/$relation_suffix
+        if [[ ${volume[action]} == relation && ${volume[backing]:-} == vol_root ]]; then
+            local -n root=vol_root
+            local relation_path=$install_root
+            if [[ ${volume[subvol]} == "${root[subvol]:-}"/* ]]; then
+                relation_path=$install_root/${volume[subvol]#"${root[subvol]}"/}
             fi
-            if [[ -n $relation_path && $target_path == "$relation_path" && ${vol_subvol_create[$index]:-false} == true ]]; then
-                log "Prepared root-backed Btrfs subvolume ${vol_subvol[$index]} for $mount_point"
-                continue
-            fi
+            [[ $target_path == "$relation_path" ]] && continue
         fi
-        staging=$work_root/vol-$index
+        staging=$work_root/$record
         mkdir -p "$staging"
-        mount -t "$filesystem" -o "$options" "$source" "$staging"
+        vol_mount_filesystem "$source" "$filesystem" "$options" "$staging"
         cleanup_mounts+=("$staging")
 
         log "Migrating existing content for $mount_point onto $source"
@@ -131,7 +127,7 @@ vol_migrate_mounts() {
         clear_directory "$target_path"
         umount "$staging"
         unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
-        mount -t "$filesystem" -o "$options" "$source" "$target_path"
+        vol_mount_filesystem "$source" "$filesystem" "$options" "$target_path"
         cleanup_mounts+=("$target_path")
     done
 }

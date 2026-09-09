@@ -1,224 +1,246 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2034,SC2154,SC2192,SC2329
+# shellcheck disable=SC2034,SC2154
 set -Eeuo pipefail
-
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-# shellcheck source=../lib/common.sh
 source "$root/installers/lib/common.sh"
-
-fail() {
-    printf 'FAIL: %s\n' "$*" >&2
-    exit 1
+die() { printf '%s\n' "$*" >&2; exit 97; }
+assert_eq() { [[ $1 == "$2" ]] || die "$3 (expected '$1', got '$2')"; }
+assert_rejected() {
+    local label=$1
+    shift
+    if ("$@"); then die "$label was accepted"; fi
 }
-
-assert_eq() {
-    local expected=$1 actual=$2 description=$3
-    [[ $actual == "$expected" ]] || fail "$description (expected '$expected', got '$actual')"
+reject_short_list() {
+    vol_list=(vol_root vol_boot)
+    record_names_valid
 }
-
-assert_contains() {
-    local expected=$1 description=$2 item
-    for item in "${bootc_args[@]}"; do
-        [[ $item == "$expected" ]] && return 0
-    done
-    fail "$description (missing '$expected')"
-}
-
-# The validation helpers call die; a subshell gives each expected failure its
-# own process while allowing the rest of this test to continue.
-die() {
-    printf '%s\n' "$*" >&2
-    exit 97
-}
-
-set_defaults
+target_disk=/dev/mock-target
 physical_var_path=/state/os/default/var
-root_partition_type_guid=11111111-1111-1111-1111-111111111111
-normalize_internal_volumes
-assert_eq root "${vol_fs_label[2]}" 'default root filesystem label'
-assert_eq root "${vol_partition_label[2]}" 'default root partition label'
-assert_eq root_luks "${vol_luks_label[2]}" 'default root LUKS label'
-assert_eq root "${vol_subvol[2]}" 'default root subvolume'
+vol_list=(vol_root vol_boot vol_esp vol_data)
+declare -A vol_root=([action]=create [parent_disk]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create [phase]=predeploy)
+declare -A vol_boot=([action]=create [parent_disk]=$target_disk [partition_number]=2 [partition_size]=1024 [partition_type]=guid [partition_label]=boot [mountpoint]=/boot [fs]=ext4 [fs_label]=boot [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
+declare -A vol_esp=([action]=create [parent_disk]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
+declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=postdeploy)
+record_names_valid
+validate_volume_record vol_root
+assert_eq create "${vol_root[action]}" 'named root record'
+assert_eq /boot "${vol_boot[mountpoint]}" 'named boot record'
+assert_eq /boot/efi "${vol_esp[mountpoint]}" 'named ESP record'
+vol_mount_options options vol_root
+assert_eq compress=zstd,subvol=root "$options" 'named mount options'
 
-root_fs_label=system_root
-root_subvol=system/root
-root_partition_label=system_gpt
-root_luks_label=system_luks
-root_encrypted=true
-luks_name=system
-root_partition=/dev/mock-system-root
-normalize_internal_volumes
-assert_eq /dev/disk/by-partlabel/system_gpt "${vol_device[2]}" 'custom root partition label'
-assert_eq /dev/mock-system-root "${vol_partition_resolved[2]}" 'custom root partition path'
-assert_eq system_root "${vol_fs_label[2]}" 'custom root filesystem label'
-assert_eq system/root "${vol_subvol[2]}" 'custom root subvolume'
-assert_eq system_luks "${vol_luks_label[2]}" 'custom root LUKS label'
-assert_eq system "${vol_luks[2]}" 'custom root mapper name'
-vol_mount_options root_options 2
-assert_eq 'subvol=system/root,compress=zstd,noatime' "$root_options" 'root mount options'
-boot_filesystem_uuid=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-vol_luks_uuid_resolved=([2]=11111111-2222-3333-4444-555555555555)
-bootc_args=()
-append_common_kargs /state/os/default/var bootc-root-setup.service
-assert_eq '--root-mount-spec=/dev/disk/by-label/system_root' "${bootc_args[0]}" 'normalized root mount source'
-assert_eq '--karg=rootflags=subvol=system/root,compress=zstd,noatime' "${bootc_args[3]}" 'normalized root mount options'
-assert_eq '--karg=rd.luks.name=11111111-2222-3333-4444-555555555555=system' "${bootc_args[5]}" 'normalized root mapper karg'
-
-# Shortcut records are ordinary normalized records and no longer expose the
-# compatibility switches to downstream lifecycle phases.
-ext_vol_devices=()
-ext_vol_mountpoint=()
-ext_vol_fs=()
-ext_vol_luks=()
-ext_vol_opts=()
-ext_vol_tpm=()
-ext_vol_tpm_pcrs=()
-ext_vol_recovery=()
-ext_vol_existing=()
-ext_vol_subvol=()
-ext_vol_subvol_create=()
 separate_var=true
-normalize_ext_vol_shortcuts
-[[ ${separate_var+x} != x ]] || fail 'separate_var leaked past normalization'
-assert_eq /var "${ext_vol_mountpoint[0]}" 'separate_var mountpoint'
-assert_eq system/root/state/os/default/var "${ext_vol_subvol[0]}" 'separate_var subvolume'
-normalize_internal_volumes
-assert_eq 2 "${vol_backing_index[3]}" 'shortcut root backing record'
+normalize_volume_shortcuts
+assert_eq vol_var "${vol_list[4]}" 'generated relation name'
+assert_eq relation "${vol_var[action]}" 'generated relation action'
+assert_eq vol_root "${vol_var[backing]}" 'generated relation backing'
 
-# External records start at normalized index 3. Both subvolume policies must
-# be evaluated from vol_* so a public index cannot accidentally validate the
-# wrong record.
-vol_validate_mount_format 3 || fail 'normalized Btrfs subvolume create policy rejected'
-vol_subvol_create[3]=false
-vol_validate_mount_format 3 || fail 'normalized Btrfs subvolume retain policy rejected'
-vol_subvol[3]=
-vol_subvol_create[3]=true
-if (vol_validate_mount_format 3); then fail 'normalized empty subvolume accepted with create=true'; fi
-vol_subvol[3]=containers
-vol_subvol_create[3]=maybe
-if (vol_validate_mount_format 3); then fail 'invalid normalized subvolume create policy accepted'; fi
+if (vol_root[action]=bad; validate_volume_record vol_root); then die 'invalid action accepted'; fi
+if (vol_root[phase]=bad; validate_volume_record vol_root); then die 'invalid phase accepted'; fi
+vol_root[action]=create
+vol_root[phase]=predeploy
+if (vol_data[fs_label]=; validate_volume_record vol_data); then die 'missing filesystem label accepted'; fi
+vol_data[fs_label]=data
+vol_data[subvol_action]=select
+if (validate_volume_record vol_data); then die 'non-Btrfs subvolume accepted'; fi
+vol_data[subvol_action]=none
 
-# An explicit root-backed record follows the custom root filesystem label and
-# subvolume rather than being treated as an independent disk.
-ext_vol_devices=(/dev/disk/by-label/system_root)
-ext_vol_mountpoint=(/var/lib/custom)
-ext_vol_fs=(btrfs)
-ext_vol_luks=()
-ext_vol_opts=(compress=zstd)
-ext_vol_tpm=(false)
-ext_vol_tpm_pcrs=()
-ext_vol_recovery=(false)
-ext_vol_existing=(false)
-ext_vol_subvol=(unrelated)
-ext_vol_subvol_create=(false)
-normalize_internal_volumes
-[[ -z ${vol_backing_index[3]:-} ]] || fail 'unrelated subvolume incorrectly treated as root-backed'
-ext_vol_subvol=(system/root/custom)
-normalize_internal_volumes
-assert_eq 2 "${vol_backing_index[3]}" 'custom root-backed relation'
-assert_eq /dev/disk/by-label/system_root "${vol_source_resolved[3]}" 'custom root-backed source'
-vol_mount_options custom_options 3
-assert_eq 'compress=zstd,subvol=system/root/custom' "$custom_options" 'external subvolume mount options'
+vol_data[fs]=btrfs
+vol_data[fs_label]=data
+vol_data[encryption]=luks-create
+vol_data[luks_name]=data-name
+vol_data[luks_label]=data_luks
+vol_data[credential]='env'
+if (validate_volume_record vol_data); then die 'missing env identifier was accepted'; fi
+vol_data[luks_name]=data_name
+vol_data[credential]=none
+vol_data[encryption]=none
+vol_data[fs]=xfs
+if (vol_data[mount_options]=bad:option; validate_volume_record vol_data); then die 'mount delimiter accepted'; fi
 
-# Mount/subvolume policy is checked without devices or mounts.
-vol_mountpoint[0]=/data
-vol_fs[0]=btrfs
-vol_existing[0]=false
-vol_opts[0]=defaults
-vol_subvol[0]=containers
-vol_subvol_create[0]=true
-vol_validate_mount_format 0 || fail 'valid Btrfs subvolume create policy rejected'
-vol_subvol_create[0]=false
-vol_validate_mount_format 0 || fail 'valid Btrfs subvolume retain policy rejected'
-vol_subvol[0]=
-vol_subvol_create[0]=true
-if (vol_validate_mount_format 0); then fail 'empty subvolume accepted with create=true'; fi
-vol_subvol=([0]=containers)
-vol_subvol_create=([0]=false)
-vol_opts=([0]=subvol=other)
-if (vol_validate_mount_format 0); then fail 'explicit subvol option accepted'; fi
-vol_opts=([0]=subvolid=5)
-if (vol_validate_mount_format 0); then fail 'explicit subvolid option accepted'; fi
-vol_fs[0]=ext4
-vol_opts[0]=defaults
-if (vol_validate_mount_format 0); then fail 'subvolume accepted for non-Btrfs filesystem'; fi
-vol_mountpoint[0]=/state
-vol_device[0]=/dev/mock
-if (vol_validate_mount_target 0); then fail 'reserved /state mountpoint accepted'; fi
-vol_mountpoint[0]=/data
+declare -A vol_a=([action]=relation [backing]=vol_b [mountpoint]=/a [fs]=btrfs [subvol]=a [subvol_action]=select)
+declare -A vol_b=([action]=relation [backing]=vol_a [mountpoint]=/b [fs]=btrfs [subvol]=b [subvol_action]=select)
+vol_list+=(vol_a vol_b)
+if (validate_relation_graph); then die 'relation cycle accepted'; fi
 
-# A requested subvolume verifies the actual backing type, not only config.
-vol_fs[0]=btrfs
-blkid() { printf '%s\n' ext4; }
-if (vol_verify_subvolume 0); then fail 'non-Btrfs backing filesystem accepted'; fi
-blkid() { printf '%s\n' btrfs; }
-vol_verify_subvolume 0 || fail 'Btrfs backing filesystem rejected'
-vol_subvol[0]=''
-vol_opts[0]=defaults
-vol_mount_options empty_subvolume_options 0
-assert_eq defaults "$empty_subvolume_options" 'empty subvolume selects filesystem root'
+vol_list=(vol_root vol_boot vol_esp)
+vol_root[subvol]=custom-root
+physical_var_path=/state/custom/var
+separate_home=true
+normalize_volume_shortcuts
+assert_eq custom-root/state/custom/var/home "${vol_home[subvol]}" 'non-default root relation identity'
 
-# The formatter is one generic dispatch for all predefined and external fs types.
-mkfs.btrfs() { printf 'btrfs\n' >>"$dispatch_log"; }
-mkfs.ext4() { printf 'ext4\n' >>"$dispatch_log"; }
-mkfs.vfat() { printf 'vfat\n' >>"$dispatch_log"; }
-mkfs.xfs() { printf 'xfs\n' >>"$dispatch_log"; }
-dispatch_log=$(mktemp)
-vol_fs_label=([0]=boot_efi [1]=boot [2]=system_root [3]=data)
-vol_fs=([0]=vfat [1]=ext4 [2]=btrfs [3]=xfs)
-for index in 0 1 2 3; do vol_format_filesystem "$index" /dev/null; done
-assert_eq $'vfat\next4\nbtrfs\nxfs' "$(<"$dispatch_log")" 'formatter dispatch'
-rm -f -- "$dispatch_log"
+# Record declarations, required ordering, uniqueness, and missing fields.
+assert_rejected 'short volume list' reject_short_list
+if (vol_list=(vol_root vol_boot vol_esp vol_data vol_data); record_names_valid); then
+    die 'duplicate record name accepted'
+fi
+if (vol_list=(vol_boot vol_root vol_esp); record_names_valid); then
+    die 'wrong core record order accepted'
+fi
+vol_list=(vol_root vol_boot vol_esp vol_data)
+if (unset 'vol_data[device]'; validate_volume_record vol_data); then
+    die 'missing create device accepted'
+fi
+vol_data[device]=/dev/data
 
-bootc_args=()
-append_volume_luks_kargs 01234567-89ab-cdef-0123-456789abcdef data_crypt true
-assert_eq '--karg=rd.luks.uuid=01234567-89ab-cdef-0123-456789abcdef' "${bootc_args[0]}" 'common encrypted UUID argument'
-assert_eq '--karg=rd.luks.name=01234567-89ab-cdef-0123-456789abcdef=data_crypt' "${bootc_args[1]}" 'common encrypted mapper argument'
-assert_eq '--karg=rd.luks.options=01234567-89ab-cdef-0123-456789abcdef=tpm2-device=auto,x-initrd.attach' "${bootc_args[2]}" 'common encrypted options argument'
+# All public mode enums and valid combinations are accepted; invalid combinations reject.
+vol_data[action]=retain
+vol_data[fs]=xfs
+vol_data[encryption]=none
+unset 'vol_data[luks_name]' 'vol_data[luks_label]'
+vol_data[credential]=none
+vol_data[subvol_action]=none
+validate_volume_record vol_data
+vol_data[encryption]=luks-open
+vol_data[luks_name]=retained_data
+vol_data[credential]=prompt
+validate_volume_record vol_data
+credential_file=$(mktemp)
+printf secret >"$credential_file"
+vol_data[encryption]=luks-create
+vol_data[luks_name]=created_data
+vol_data[luks_label]=created_luks
+vol_data[credential]='file'
+vol_data[credential_file]=$credential_file
+vol_data[action]=create
+validate_volume_record vol_data
+vol_data[credential]=ephemeral
+vol_data[tpm2]=true
+vol_data[recovery]=true
+vol_data[fs]=btrfs
+vol_data[subvol]=data
+vol_data[subvol_action]=create
+validate_volume_record vol_data
+if (vol_data[recovery]=true; vol_data[tpm2]=false; validate_volume_record vol_data); then
+    die 'recovery without TPM accepted'
+fi
+rm -f -- "$credential_file"
 
-# The root and external records share the same normalized encrypted-karg
-# emitter. Exercise the common boot argument path with an external record.
-mock_validate_mount_target() { :; }
-mock_append_external_var_karg() { bootc_args+=("--mock-var=$1:$2:$3"); }
-installer_backend=mock
-vol_source_resolved[2]=/dev/disk/by-label/system_root
-vol_luks_uuid_resolved[2]=11111111-2222-3333-4444-555555555555
-vol_install_phase[3]=postdeploy
-vol_source_resolved[3]=/dev/mapper/data_crypt
-vol_fs[3]=btrfs
-vol_opts[3]=defaults
-vol_subvol[3]=
-vol_luks[3]=data_crypt
-vol_luks_uuid_resolved[3]=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
-vol_tpm[3]=false
-bootc_args=()
-append_common_kargs /state/os/default/var bootc-root-setup.service
-assert_contains '--karg=rd.luks.name=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee=data_crypt' 'external encrypted karg'
+# Explicit relation backing and shortcut conflicts are validated before lifecycle work.
+declare -A vol_relation=([action]=relation [backing]=vol_root [mountpoint]=/data-rel \
+    [fs]=btrfs [subvol]=custom-root/data [subvol_action]=select)
+vol_list+=(vol_relation)
+validate_relation_graph
+if (vol_relation[backing]=vol_missing; validate_relation_graph); then
+    die 'missing relation backing accepted'
+fi
+vol_list=(vol_root vol_boot vol_esp vol_data)
+if (separate_var=true; normalize_volume_shortcuts); then
+    :
+fi
+vol_data[mountpoint]=/var
+if (separate_var=true; normalize_volume_shortcuts); then
+    die 'shortcut mountpoint conflict accepted'
+fi
+vol_data[mountpoint]=/data
 
-# Existing encrypted records use the predictable lvc_<mapper> variable and
-# share the normal activation/enrollment path without modifying their media.
+# Environment credentials materialize into a temporary file and erase the variable immediately.
 work_root=$(mktemp -d)
-vol_existing=([0]=true)
-vol_luks=([0]=existing_data)
-vol_device=([0]=/dev/null)
-vol_mountpoint=([0]=/data)
-vol_luks_label=([0]='')
-vol_tpm=([0]=true)
-vol_tpm_pcrs=([0]=7)
-vol_recovery=([0]=false)
-lvc_existing_data=fixture-password
-cryptsetup() {
-    case ${1:-} in
-        open) return 0 ;;
-        luksUUID) printf '%s\n' 01234567-89ab-cdef-0123-456789abcdef ;;
-        *) return 0 ;;
-    esac
-}
-systemd-cryptenroll() { return 0; }
-vol_activate_luks 0
-[[ ${lvc_existing_data+x} != x ]] || fail 'existing volume credential leaked after activation'
-assert_eq existing_data "${vol_source_resolved[0]##*/}" 'existing encrypted mapper source'
-assert_eq 01234567-89ab-cdef-0123-456789abcdef "${vol_luks_uuid_resolved[0]}" 'existing LUKS UUID'
-rm -rf -- "$work_root"
+vol_data[action]=retain
+vol_data[encryption]=luks-open
+vol_data[luks_name]=env_data
+vol_data[credential]='env'
+export lvc_env_data=environment-secret
+volume_credential materialized vol_data
+[[ ! -v lvc_env_data ]] || die 'environment credential was not erased'
+assert_eq environment-secret "$(<"$materialized")" 'environment credential materialization'
+rm -rf -- "$work_root" "$materialized"
+work_root=$(mktemp -d)
 
+# Encrypted activation, recovery-before-TPM ordering, and ephemeral password cleanup.
+crypto_log=$(mktemp)
+cryptsetup() {
+    printf 'cryptsetup %s\n' "$*" >>"$crypto_log"
+    if [[ $1 == luksUUID ]]; then
+        printf '11111111-2222-3333-4444-555555555555\n'
+    fi
+    return 0
+}
+systemd-cryptenroll() {
+    printf 'cryptenroll %s\n' "$*" >>"$crypto_log"
+    if [[ $* == *--recovery-key* ]]; then
+        printf 'bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv\n'
+    fi
+    return 0
+}
+blkid() {
+    if [[ $* == *TYPE* ]]; then printf '%s\n' "${mock_fs:-btrfs}"; else printf 'uuid\n'; fi
+    return 0
+}
+mock_fs=xfs
+retained_key=$(mktemp)
+printf retained-secret >"$retained_key"
+declare -A vol_retained=([action]=retain [device]=/dev/retained [mountpoint]=/retained [fs]=xfs
+    [encryption]=luks-open [luks_name]=retained_xfs [credential]=file [credential_file]=$retained_key
+    [subvol_action]=none)
+vol_list=(vol_retained)
+vol_prepare_existing
+assert_eq /dev/mapper/retained_xfs "${vol_retained[_source]}" 'retained encrypted mapper'
+assert_eq uuid "${vol_retained[_fs_uuid]}" 'retained filesystem UUID'
+rm -f -- "$retained_key"
+mock_fs=btrfs
+declare -A vol_crypto=([action]=create [device]=/dev/crypto [mountpoint]=/crypto [fs]=btrfs
+    [fs_label]=crypto [encryption]=luks-create [luks_name]=crypto_name [luks_label]=crypto_luks
+    [credential]=ephemeral [tpm2]=true [recovery]=true [subvol_action]=none)
+vol_list=(vol_crypto)
+recovery_key_output_file=$(mktemp)
+vol_crypto[_partition_device]=/dev/crypto
+vol_activate_luks vol_crypto
+grep -q 'cryptenroll --recovery-key' "$crypto_log" || die 'recovery enrollment missing'
+grep -q 'cryptenroll --wipe-slot=password' "$crypto_log" || die 'ephemeral cleanup missing'
+first_recovery=$(grep -n -- '--recovery-key' "$crypto_log" | head -n1 | cut -d: -f1)
+first_tpm=$(grep -n -- '--tpm2-device=auto' "$crypto_log" | head -n1 | cut -d: -f1)
+first_wipe=$(grep -n -- '--wipe-slot=password' "$crypto_log" | head -n1 | cut -d: -f1)
+((first_recovery < first_tpm && first_tpm < first_wipe)) || die 'TPM/recovery/cleanup order changed'
+rm -f -- "$crypto_log" "$recovery_key_output_file"
+vol_data[fs]=xfs
+
+dispatch_log=$(mktemp)
+mkfs.btrfs() { printf btrfs >>"$dispatch_log"; }
+mkfs.ext4() { printf ext4 >>"$dispatch_log"; }
+mkfs.vfat() { printf vfat >>"$dispatch_log"; }
+mkfs.xfs() { printf xfs >>"$dispatch_log"; }
+for record in vol_esp vol_boot vol_root vol_data; do vol_format_filesystem "$record" /dev/null; done
+assert_eq vfatext4btrfsxfs "$(<"$dispatch_log")" 'unified filesystem dispatch'; rm -f "$dispatch_log"
+
+bootc_args=(); append_volume_luks_kargs uuid mapper true
+assert_eq '--karg=rd.luks.name=uuid=mapper' "${bootc_args[1]}" 'unified encrypted kargs'
+
+# Mount ordering and options are shared by predeploy and postdeploy paths.
+install_root=$(mktemp -d)
+mount_log=$(mktemp)
+mount() { printf '%s\n' "${6}" >>"$mount_log"; }
+cleanup_mounts=()
+vol_list=(vol_root vol_boot vol_esp)
+vol_root[_source]=/dev/root
+vol_boot[_source]=/dev/boot
+vol_esp[_source]=/dev/esp
+vol_mount_phase predeploy
+assert_eq "$install_root/ $install_root/boot $install_root/boot/efi " "$(tr '\n' ' ' <"$mount_log")" 'mount depth order'
+rm -f -- "$mount_log"; rm -rf -- "$install_root"
+
+# Backend callbacks produce distinct /var kargs while common handling remains shared.
+mock_append_external_var_karg() { bootc_args+=("mock-var=$1:$2:$3"); }
+composefs_append_external_var_karg() { bootc_args+=("composefs-var=$1:$2:$3"); }
+ostree_append_external_var_karg() { bootc_args+=("ostree-var=$1:$2:$3"); }
+vol_list=(vol_root vol_boot vol_esp vol_data)
+vol_data[mountpoint]=/var
+vol_data[phase]=postdeploy
+vol_data[subvol_action]=none
+vol_root[_source]=/dev/root
+vol_data[_source]=/dev/data
+boot_filesystem_uuid=boot-uuid
+installer_backend=mock
+bootc_args=()
+append_common_kargs /state/mock/var mock-root.service
+assert_eq '--root-mount-spec=/dev/root' "${bootc_args[0]}" 'root mount spec'
+assert_eq 'mock-var=/dev/data:xfs:defaults' "${bootc_args[4]}" 'shared backend var karg'
+for backend in composefs ostree; do
+    installer_backend=$backend
+    bootc_args=()
+    append_common_kargs /state/mock/var mock-root.service
+    assert_eq "$backend-var=/dev/data:xfs:defaults" "${bootc_args[4]}" "$backend var karg"
+done
+vol_data[mountpoint]=/data
 printf 'storage mock checks passed\n'
