@@ -23,7 +23,7 @@ recovery_key() {
         index=$((byte % alphabet_length))
         raw+=${alphabet:index:1}
     done
-    printf '%s-%s-%s-%s-%s-%s-%s-%s\n' \
+    printf '%s-%s-%s-%s-%s-%s-%s-%s' \
         "${raw:0:8}" "${raw:8:8}" "${raw:16:8}" "${raw:24:8}" \
         "${raw:32:8}" "${raw:40:8}" "${raw:48:8}" "${raw:56:8}"
 }
