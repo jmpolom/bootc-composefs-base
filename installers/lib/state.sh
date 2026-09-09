@@ -74,65 +74,14 @@ prepare_mount_target() {
         die "external volume target could not be created as a directory: $requested_path"
 }
 
-root_backed_ext_vol_path() {
-    local index=$1
-    local subvolume
-    subvolume=$(root_backed_ext_vol_subvolume "$index") || return 1
-    printf '%s%s\n' "$install_root" "${subvolume#root}"
-}
-
-prepare_root_backed_ext_vol() {
-    local subvolume=$1
-    local subvolume_path=$2
-    local parent_path=$subvolume_path
-    local old_path
-
-    # The subvolume path is inside the already-mounted root filesystem.  Do
-    # not follow symlinks while preparing any missing parent, and do not
-    # replace a symlink or non-directory supplied by the image.
-    while [[ $parent_path != / ]]; do
-        if [[ -L $parent_path ]]; then
-            die "root-backed external volume subvolume is a symlink: $subvolume"
-        fi
-        if [[ -e $parent_path ]]; then
-            [[ -d $parent_path ]] || die "root-backed external volume subvolume is not a directory: $subvolume"
-        fi
-        parent_path=${parent_path%/*}
-        [[ -n $parent_path ]] || parent_path=/
-    done
-
-    if btrfs subvolume show "$subvolume_path" >/dev/null 2>&1; then
-        return 0
-    fi
-    [[ ! -L $subvolume_path ]] || die "root-backed external volume subvolume is a symlink: $subvolume"
-
-    if [[ -e $subvolume_path ]]; then
-        [[ -d $subvolume_path ]] || die "root-backed external volume subvolume is not a directory: $subvolume"
-        old_path="${subvolume_path}.bootc-installer-old"
-        [[ ! -e $old_path && ! -L $old_path ]] ||
-            die "temporary migration path already exists: $old_path"
-        mv "$subvolume_path" "$old_path"
-        btrfs subvolume create "$subvolume_path"
-        chown root:root "$subvolume_path"
-        chmod 0755 "$subvolume_path"
-        cp -a --reflink=auto "$old_path/." "$subvolume_path/"
-        rm -rf -- "$old_path"
-    else
-        mkdir -p -- "$(dirname -- "$subvolume_path")"
-        btrfs subvolume create "$subvolume_path"
-        chown root:root "$subvolume_path"
-        chmod 0755 "$subvolume_path"
-    fi
-}
-
-prepare_ext_vol_targets() {
+vol_prepare_targets() {
     local config_root=$1
     local persistent_var=$2
-    local count=${#ext_vol_devices[@]}
     local index mount_point target_path
 
-    for ((index = 0; index < count; index++)); do
-        mount_point=${ext_vol_mountpoint[$index]}
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
+        mount_point=${vol_mountpoint[$index]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
         prepare_mount_target "$mount_point" "$target_path"
     done
@@ -143,61 +92,47 @@ clear_directory() {
     find "$directory" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 }
 
-configure_ext_vols() {
+vol_migrate_mounts() {
     local config_root=$1
     local persistent_var=$2
-    local count=${#ext_vol_devices[@]}
-    ((count > 0)) || return 0
-
-    local index label filesystem options mount_point target_path source staging root_subvolume root_subvolume_path
-    for ((index = 0; index < count; index++)); do
-        label=${ext_vol_labels_resolved[$index]:-}
-        filesystem=${ext_vol_fs[$index]}
-        options=${ext_vol_opts[$index]:-defaults}
-        mount_point=${ext_vol_mountpoint[$index]}
+    local index filesystem options mount_point target_path source staging relation_path relation_suffix
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
+        filesystem=${vol_fs[$index]}
+        vol_mount_options options "$index"
+        mount_point=${vol_mountpoint[$index]}
         target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
-        source=${ext_vol_sources_resolved[$index]:-}
+        source=${vol_source_resolved[$index]:-}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
-        staging=$work_root/ext-vol-$index
-
-        if root_subvolume=$(root_backed_ext_vol_subvolume "$index"); then
-            root_subvolume_path=$(root_backed_ext_vol_path "$index")
-            prepare_root_backed_ext_vol "$root_subvolume" "$root_subvolume_path"
-            # /var and its descendants already name the selected subvolume in
-            # the installed tree.  Leave that mount in place; the boot karg
-            # will mount the same root-backed subvolume in the deployed system.
-            if [[ $target_path == "$root_subvolume_path" ]]; then
-                log "Prepared root-backed Btrfs subvolume $root_subvolume for $mount_point"
+        if [[ ${vol_backing_index[$index]:-} == 2 ]]; then
+            relation_path=
+            if [[ ${vol_subvol[$index]} == "$root_subvol" ]]; then
+                relation_path=$install_root
+            elif [[ ${vol_subvol[$index]} == "$root_subvol"/* ]]; then
+                relation_suffix=${vol_subvol[$index]#"$root_subvol"/}
+                relation_path=$install_root/$relation_suffix
+            fi
+            if [[ -n $relation_path && $target_path == "$relation_path" && ${vol_subvol_create[$index]:-false} == true ]]; then
+                log "Prepared root-backed Btrfs subvolume ${vol_subvol[$index]} for $mount_point"
                 continue
             fi
         fi
-
+        staging=$work_root/vol-$index
         mkdir -p "$staging"
         mount -t "$filesystem" -o "$options" "$source" "$staging"
         cleanup_mounts+=("$staging")
 
+        log "Migrating existing content for $mount_point onto $source"
         if state_path_for_mount "$persistent_var" "$mount_point" >/dev/null; then
-            log "Moving existing state for $mount_point onto $source"
-            chown root:root "$staging"
-            chmod 0755 "$staging"
+            chown root:root "$staging"; chmod 0755 "$staging"
             label_new_state_path "$staging" "$mount_point" "$target_path"
-            cp -a --reflink=auto "$target_path/." "$staging/"
-            clear_directory "$target_path"
-            umount "$staging"
-            unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
-
-            mount -t "$filesystem" -o "$options" "$source" "$target_path"
-            cleanup_mounts+=("$target_path")
-        else
-            log "Migrating existing content for literal target $mount_point onto $source"
-            cp -a --reflink=auto "$target_path/." "$staging/"
-            clear_directory "$target_path"
-            umount "$staging"
-            unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
-
-            mount -t "$filesystem" -o "$options" "$source" "$target_path"
-            cleanup_mounts+=("$target_path")
         fi
+        cp -a --reflink=auto "$target_path/." "$staging/"
+        clear_directory "$target_path"
+        umount "$staging"
+        unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
+        mount -t "$filesystem" -o "$options" "$source" "$target_path"
+        cleanup_mounts+=("$target_path")
     done
 }
 

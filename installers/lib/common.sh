@@ -69,6 +69,10 @@ parse_options() {
 }
 
 set_defaults() {
+    root_fs_label=${root_fs_label:-root}
+    root_subvol=${root_subvol:-root}
+    root_partition_label=${root_partition_label:-root}
+    root_luks_label=${root_luks_label:-root_luks}
     root_encrypted=${root_encrypted:-false}
     root_tpm2=${root_tpm2:-false}
     root_tpm2_pcrs=${root_tpm2_pcrs:-}
@@ -102,6 +106,8 @@ set_defaults() {
     ensure_indexed_array ext_vol_tpm_pcrs
     ensure_indexed_array ext_vol_recovery
     ensure_indexed_array ext_vol_existing
+    ensure_indexed_array ext_vol_subvol
+    ensure_indexed_array ext_vol_subvol_create
 }
 
 ensure_indexed_array() {
@@ -271,6 +277,17 @@ append_external_var_karg() {
     backend_callback append_external_var_karg "$@"
 }
 
+append_volume_luks_kargs() {
+    local uuid=$1 name=$2 tpm=${3:-false} options=x-initrd.attach
+    [[ -n $uuid ]] || return 0
+    [[ $tpm == true ]] && options='tpm2-device=auto,x-initrd.attach'
+    bootc_args+=(
+        "--karg=rd.luks.uuid=$uuid"
+        "--karg=rd.luks.name=$uuid=$name"
+        "--karg=rd.luks.options=$uuid=$options"
+    )
+}
+
 
 validate_common_config() {
     [[ $destructive_confirmed == true ]] || die "-y is required to authorize erasing the configured disks"
@@ -334,18 +351,19 @@ validate_common_config() {
     require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
         dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sync udevadm umount \
         touch useradd usermod wipefs
-    validate_ext_vol_config
+    validate_vol_config
 
     local recovery_requested=$root_tpm2_recovery
     local index
-    for ((index = 0; index < ${#ext_vol_devices[@]}; index++)); do
-        if [[ ${ext_vol_recovery[$index]:-false} == true ]]; then
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_role[$index]} == ext ]] || continue
+        if [[ ${vol_recovery[$index]:-false} == true ]]; then
             recovery_requested=true
         fi
-        if [[ $luks_ephemeral_key == true && ${ext_vol_existing[$index]:-false} == false && \
-              -n ${ext_vol_luks[$index]:-} && \
-              ${ext_vol_recovery[$index]:-false} != true ]]; then
-            die "luks_ephemeral_key requires a recovery key for encrypted external volume: ${ext_vol_mountpoint[$index]}"
+        if [[ $luks_ephemeral_key == true && ${vol_existing[$index]:-false} == false && \
+              -n ${vol_luks[$index]:-} && \
+              ${vol_recovery[$index]:-false} != true ]]; then
+            die "luks_ephemeral_key requires a recovery key for encrypted external volume: ${vol_mountpoint[$index]}"
         fi
     done
     if [[ $luks_ephemeral_key == true && $root_encrypted == true && $root_tpm2_recovery != true ]]; then
@@ -367,24 +385,33 @@ validate_common_config() {
 append_common_kargs() {
     local physical_var_path=$1
     local root_setup_unit=$2
+    local root_mount_spec='' root_mount_options_for_kargs='' index
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_mountpoint[$index]} == / ]] || continue
+        root_mount_spec=${vol_source_resolved[$index]:-}
+        vol_mount_options root_mount_options_for_kargs "$index"
+        break
+    done
+    [[ -n $root_mount_spec ]] || die 'normalized root volume source is unavailable'
 
     bootc_args+=(
-        "--root-mount-spec=/dev/disk/by-label/root"
+        "--root-mount-spec=$root_mount_spec"
         "--boot-mount-spec=UUID=$boot_filesystem_uuid"
         "--karg=rootfstype=btrfs"
-        "--karg=rootflags=subvol=root,$root_mount_options"
+        "--karg=rootflags=$root_mount_options_for_kargs"
     )
 
-    if [[ $root_encrypted == true ]]; then
-        local root_luks_options=x-initrd.attach
-        if [[ $root_tpm2 == true ]]; then
-            root_luks_options='tpm2-device=auto,x-initrd.attach'
+    local root_luks_uuid_for_kargs='' root_luks_name_for_kargs='' root_luks_tpm_for_kargs=false
+    for index in "${!vol_role[@]}"; do
+        if [[ ${vol_mountpoint[$index]} == / ]]; then
+            root_luks_uuid_for_kargs=${vol_luks_uuid_resolved[$index]:-}
+            root_luks_name_for_kargs=${vol_luks[$index]:-}
+            root_luks_tpm_for_kargs=${vol_tpm[$index]:-false}
+            break
         fi
-        bootc_args+=(
-            "--karg=rd.luks.uuid=${root_luks_uuid}"
-            "--karg=rd.luks.name=${root_luks_uuid}=${luks_name}"
-            "--karg=rd.luks.options=${root_luks_uuid}=${root_luks_options}"
-        )
+    done
+    if [[ $root_encrypted == true ]]; then
+        append_volume_luks_kargs "$root_luks_uuid_for_kargs" "$root_luks_name_for_kargs" "$root_luks_tpm_for_kargs"
     fi
 
     local karg
@@ -392,12 +419,13 @@ append_common_kargs() {
         [[ -n $karg ]] && bootc_args+=("--karg=$karg")
     done
 
-    local index source filesystem options mount_point uuid luks_name luks_options
-    for ((index = 0; index < ${#ext_vol_devices[@]}; index++)); do
-        source=${ext_vol_sources_resolved[$index]:-}
-        filesystem=${ext_vol_fs[$index]}
-        options=${ext_vol_opts[$index]:-defaults}
-        mount_point=${ext_vol_mountpoint[$index]}
+    local source filesystem options mount_point uuid luks_name
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_install_phase[$index]} == postdeploy ]] || continue
+        source=${vol_source_resolved[$index]:-}
+        filesystem=${vol_fs[$index]}
+        vol_mount_options options "$index"
+        mount_point=${vol_mountpoint[$index]}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
         if [[ $mount_point == /var ]]; then
             append_external_var_karg "$source" "$filesystem" "$options"
@@ -405,18 +433,10 @@ append_common_kargs() {
             bootc_args+=("--karg=systemd.mount-extra=${source}:${mount_point}:${filesystem}:${options}")
         fi
 
-        uuid=${ext_vol_luks_uuids[$index]:-}
+        uuid=${vol_luks_uuid_resolved[$index]:-}
         if [[ -n $uuid ]]; then
-            luks_name=${ext_vol_luks[$index]}
-            luks_options=x-initrd.attach
-            if [[ ${ext_vol_tpm[$index]:-false} == true ]]; then
-                luks_options='tpm2-device=auto,x-initrd.attach'
-            fi
-            bootc_args+=(
-                "--karg=rd.luks.uuid=${uuid}"
-                "--karg=rd.luks.name=${uuid}=${luks_name}"
-                "--karg=rd.luks.options=${uuid}=${luks_options}"
-            )
+            luks_name=${vol_luks[$index]}
+            append_volume_luks_kargs "$uuid" "$luks_name" "${vol_tpm[$index]:-false}"
         fi
     done
 }
@@ -519,15 +539,15 @@ run_installer() {
     mkdir -p "$work_root"
     [[ $recovery_enrollment_requested == true ]] && initialize_recovery_key_output
 
-    prepare_storage
+    vol_prepare_storage
     backend_callback build_bootc_args
     run_bootc_install
 
     persistent_var="$install_root$physical_var_path"
     backend_callback locate_deployment
     backend_callback postprocess
-    prepare_ext_vol_targets "$config_root" "$persistent_var"
-    configure_ext_vols "$config_root" "$persistent_var"
+    vol_prepare_targets "$config_root" "$persistent_var"
+    vol_migrate_mounts "$config_root" "$persistent_var"
     configure_first_user "$config_root" "$persistent_var"
     relabel_target_paths "$config_root"
     finish_installation

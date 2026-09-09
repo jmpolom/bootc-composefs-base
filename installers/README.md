@@ -23,14 +23,19 @@ remain those exact targets. An existing directory is used, a missing directory a
 created, and an image symlink or other non-directory is rejected unchanged without replacement,
 unlinking, or renaming it.
 
+The root volume knobs are independent: `root_fs_label` names the Btrfs filesystem, `root_subvol`
+selects its Btrfs subvolume, `root_partition_label` names the GPT partition, and `root_luks_label`
+names the LUKS container. All default to the historical values (`root`, `root`, `root`, and
+`root_luks`, respectively); `luks_name` remains the mapper name and defaults to `root`.
+
 The three legacy switches are normalized before indexed-array validation. For a backend physical
 state path `P`, their exact generated records are:
 
 | Switch | Device | Target | Filesystem/label | Options |
 | --- | --- | --- | --- | --- |
-| `separate_var=true` | `/dev/disk/by-label/root` | `/var` | `btrfs` / `root` | `subvol=root${P},$state_mount_options` |
-| `separate_home=true` | `/dev/disk/by-label/root` | `/var/home` | `btrfs` / `root` | `subvol=root${P}/home,$state_mount_options` |
-| `separate_opt=true` | `/dev/disk/by-label/root` | `/var/opt` | `btrfs` / `root` | `subvol=root${P}/opt,$state_mount_options` |
+| `separate_var=true` | `/dev/disk/by-label/$root_fs_label` | `/var` | `btrfs` / `$root_fs_label` | `subvol=$root_subvol${P},$state_mount_options` |
+| `separate_home=true` | `/dev/disk/by-label/$root_fs_label` | `/var/home` | `btrfs` / `$root_fs_label` | `subvol=$root_subvol${P}/home,$state_mount_options` |
+| `separate_opt=true` | `/dev/disk/by-label/$root_fs_label` | `/var/opt` | `btrfs` / `$root_fs_label` | `subvol=$root_subvol${P}/opt,$state_mount_options` |
 
 The generated records set `ext_vol_luks` to empty, `ext_vol_tpm`, `ext_vol_recovery`, and
 `ext_vol_existing` to `false`, and `ext_vol_tpm_pcrs` to empty. `P` is `/state/os/default/var` for composefs and
@@ -89,6 +94,11 @@ Use `-t` for Bash `set -x`. This is debugging output and can expose passwords, h
 keys, and other sensitive values. `rust_log` is exported as `RUST_LOG` only for the bootc process;
 for example, `rust_log=bootc=debug` enables bootc debug logs.
 
+The non-destructive storage checks are in `installers/tests/storage_mock.sh` and
+`installers/tests/storage_architecture.sh`. Run both with Bash 5 (for example,
+`/opt/homebrew/bin/bash installers/tests/storage_mock.sh`) and run
+`shellcheck installers/*.sh installers/lib/*.sh installers/tests/*.sh`.
+
 Leave `source_imgref` empty when the installer runs inside the image that it should install. In that
 mode bootc discovers the running container through Podman, so invoke it from a rootful, privileged
 container with the host PID namespace (`--pid=host`). Set `source_imgref` only when installing a
@@ -146,7 +156,8 @@ ext_vol_fs=(xfs btrfs)
 ```
 
 Optional arrays at the same indexes are `ext_vol_luks`, `ext_vol_opts`, `ext_vol_tpm`,
-`ext_vol_tpm_pcrs`, `ext_vol_recovery`, and `ext_vol_existing`. An empty `ext_vol_luks` entry
+`ext_vol_tpm_pcrs`, `ext_vol_recovery`, `ext_vol_existing`, `ext_vol_subvol`, and
+`ext_vol_subvol_create`. An empty `ext_vol_luks` entry
 creates or mounts a plaintext filesystem; a nonempty entry is the lower-case LUKS mapper name.
 Created volumes support Btrfs, ext4, and XFS and identify whole disks, which are wiped and
 formatted directly without a partition table. Existing volumes may use any filesystem supported
@@ -158,6 +169,13 @@ limits; they are not configurable for created volumes. Created runtime sources u
 `/dev/disk/by-label/...`; existing plaintext sources use the configured device and existing
 encrypted sources use `/dev/mapper/<ext_vol_luks>`. Encrypted entries receive the configured
 mapper name, plus `rd.luks.uuid=`, `rd.luks.name=`, and `rd.luks.options=` arguments.
+
+`ext_vol_subvol` is empty for a filesystem-root mount. A nonempty value selects a normalized
+relative Btrfs subvolume and is added to the mount options by the common volume pipeline.
+`ext_vol_subvol_create=true` creates that subvolume when absent; `false` performs no proactive
+existence check and lets the mount operation report a missing subvolume. Creation requires a
+nonempty subvolume. Explicit `subvol=` or `subvolid=` options are rejected when `ext_vol_subvol`
+is set, and any requested subvolume requires an actual Btrfs backing filesystem.
 
 For an existing encrypted volume, an optional `lvc_<ext_vol_luks>` variable supplies either a raw
 password or a systemd recovery key. It may be set in the configuration or inherited from the
@@ -180,8 +198,8 @@ root-backed) rejects `/`, `/boot` and descendants, `/etc` and descendants, `/usr
 except `/usr/local` and its descendants, and the `/proc`, `/sys`, `/dev`, `/run`, and `/sysroot`
 trees. Composefs additionally rejects `/composefs` and `/state` trees; OSTree additionally rejects
 the `/ostree` tree. Targets must remain absolute, normalized, unique, and ordered parent before
-child. External `/etc` storage is not supported. Legacy external-mount variables are not part of
-the API and are ignored.
+child. `/state` and its descendants are reserved for every backend. External `/etc` storage is not
+supported. Legacy `extra_mount*` variables are not part of the API and are ignored.
 
 Enrollment of an existing encrypted volume is additive: opening it and enrolling TPM2 or a new
 recovery key preserves its existing filesystem, LUKS UUID, and existing key slots. The configured
@@ -213,7 +231,7 @@ their target path literally, so their installed-system targets explicitly begin 
 
 For LUKS, the scripts add `rd.luks.uuid=`, `rd.luks.name=`, and
 `rd.luks.options=...=x-initrd.attach`, while bootc gets the decrypted Btrfs filesystem through
-`--root-mount-spec=/dev/disk/by-label/root`.
+`--root-mount-spec=/dev/disk/by-label/$root_fs_label`.
 
 ## TPM2 and recovery enrollment
 

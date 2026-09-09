@@ -6,10 +6,36 @@ declare -ag opened_luks_names=()
 declare -ag temporary_luks_key_files=()
 declare -ag temporary_credential_files=()
 declare -ag external_credential_variables=()
-declare -ag ext_vol_labels_resolved=()
-declare -ag ext_vol_sources_resolved=()
-declare -ag ext_vol_luks_uuids=()
-declare -ag ext_vol_luks_labels=()
+# The public ext_vol_* arrays remain the compatibility interface for sourced
+# configuration.  These aligned records are the internal representation used
+# by the normalized storage model; vol_public_index maps an ext record back to
+# its public array index (-1 for predefined volumes).
+declare -ag vol_role=()
+declare -ag vol_public_index=()
+declare -ag vol_backing_index=()
+declare -ag vol_device=()
+declare -ag vol_parent_disk=()
+declare -ag vol_partition_index=()
+declare -ag vol_partition_size=()
+declare -ag vol_partition_type=()
+declare -ag vol_partition_label=()
+declare -ag vol_mountpoint=()
+declare -ag vol_fs=()
+declare -ag vol_fs_label=()
+declare -ag vol_opts=()
+declare -ag vol_luks=()
+declare -ag vol_luks_label=()
+declare -ag vol_tpm=()
+declare -ag vol_tpm_pcrs=()
+declare -ag vol_recovery=()
+declare -ag vol_existing=()
+declare -ag vol_subvol=()
+declare -ag vol_subvol_create=()
+declare -ag vol_install_phase=()
+declare -ag vol_source_resolved=()
+declare -ag vol_luks_uuid_resolved=()
+declare -ag vol_partition_resolved=()
+declare -ag vol_label_resolved=()
 
 # Convert the legacy state-subvolume switches into ordinary root-backed external volume
 # records before any indexed-array or mount-target validation runs.  The
@@ -17,12 +43,11 @@ declare -ag ext_vol_luks_labels=()
 # operation sees the same shape whether a record came from a shortcut or was
 # written explicitly by the user.
 normalize_ext_vol_shortcuts() {
-    local shortcut value target subvolume index insertion_index max_index array_name
-    local -n array_ref
-    local -a ext_vol_array_names=(
-        ext_vol_devices ext_vol_mountpoint ext_vol_fs
-        ext_vol_luks ext_vol_opts ext_vol_tpm ext_vol_tpm_pcrs
-        ext_vol_recovery ext_vol_existing
+    local shortcut value target subvolume index insertion max_index array_name old_index
+    local -a ext_volume_arrays=(
+        ext_vol_devices ext_vol_mountpoint ext_vol_fs ext_vol_luks ext_vol_opts
+        ext_vol_tpm ext_vol_tpm_pcrs ext_vol_recovery ext_vol_existing
+        ext_vol_subvol ext_vol_subvol_create
     )
 
     for shortcut in separate_var separate_home separate_opt; do
@@ -33,15 +58,15 @@ normalize_ext_vol_shortcuts() {
         case "$shortcut" in
             separate_var)
                 target=/var
-                subvolume=root${physical_var_path}
+                subvolume=${root_subvol}${physical_var_path}
                 ;;
             separate_home)
                 target=/var/home
-                subvolume=root${physical_var_path}/home
+                subvolume=${root_subvol}${physical_var_path}/home
                 ;;
             separate_opt)
                 target=/var/opt
-                subvolume=root${physical_var_path}/opt
+                subvolume=${root_subvol}${physical_var_path}/opt
                 ;;
         esac
 
@@ -50,58 +75,39 @@ normalize_ext_vol_shortcuts() {
                 die "$shortcut conflicts with an explicit external volume at $target"
         done
 
-        # Insert a generated parent immediately before the first explicit
-        # descendant.  Otherwise append after the highest defined index.  Use
-        # all arrays when finding the append position so malformed optional
-        # indexes cannot be overwritten and hidden by normalization.
-        max_index=-1
-        for array_name in "${ext_vol_array_names[@]}"; do
+        insertion=${#ext_vol_devices[@]}
+        max_index=$((insertion - 1))
+        for array_name in "${ext_volume_arrays[@]}"; do
             declare -n array_ref="$array_name"
-            for index in "${!array_ref[@]}"; do
-                if ((index > max_index)); then
-                    max_index=$index
-                fi
-            done
-        done
-        insertion_index=$((max_index + 1))
-        for index in "${!ext_vol_mountpoint[@]}"; do
-            if [[ ${ext_vol_mountpoint[$index]} == "$target"/* ]] &&
-                ((index < insertion_index)); then
-                insertion_index=$index
-            fi
-        done
-
-        # Shift every array independently so sparse holes remain holes.  An
-        # assignment through ${array[@]} would densify the arrays and could
-        # make a required missing index appear valid.
-        for array_name in "${ext_vol_array_names[@]}"; do
-            declare -n array_ref="$array_name"
-            local -a shifted=()
-            local old_index new_index
             for old_index in "${!array_ref[@]}"; do
-                if ((old_index >= insertion_index)); then
-                    new_index=$((old_index + 1))
-                else
-                    new_index=$old_index
+                ((old_index > max_index)) && max_index=$old_index
+                if [[ ${array_name} == ext_vol_mountpoint && ${array_ref[$old_index]} == "$target"/* && old_index -lt insertion ]]; then
+                    insertion=$old_index
                 fi
-                shifted[new_index]=${array_ref[old_index]}
-            done
-            array_ref=()
-            for new_index in "${!shifted[@]}"; do
-                array_ref[new_index]=${shifted[new_index]}
             done
         done
-
-        index=$insertion_index
-        ext_vol_devices[index]=/dev/disk/by-label/root
+        for array_name in "${ext_volume_arrays[@]}"; do
+            declare -n array_ref="$array_name"
+            for ((old_index = max_index; old_index >= insertion; old_index--)); do
+                if [[ ${array_ref[$old_index]+set} == set ]]; then
+                    array_ref[old_index + 1]=${array_ref[$old_index]}
+                else
+                    unset "array_ref[$((old_index + 1))]"
+                fi
+            done
+        done
+        index=$insertion
+        ext_vol_devices[index]=/dev/disk/by-label/$root_fs_label
         ext_vol_mountpoint[index]=$target
         ext_vol_fs[index]=btrfs
-        ext_vol_opts[index]="subvol=$subvolume,$state_mount_options"
+        ext_vol_opts[index]=$state_mount_options
         ext_vol_luks[index]=
         ext_vol_tpm[index]=false
         ext_vol_tpm_pcrs[index]=
         ext_vol_recovery[index]=false
         ext_vol_existing[index]=false
+        ext_vol_subvol[index]=$subvolume
+        ext_vol_subvol_create[index]=true
         log "Normalized $shortcut shortcut to root-backed external volume at $target (index $index)"
     done
 
@@ -115,41 +121,6 @@ normalize_ext_vol_shortcuts() {
 # describing a new whole-disk filesystem.  Keep this classifier based only on
 # the normalized record shape.  In particular, do not resolve the future
 # /dev/disk/by-label/root path while validating it as an independent device.
-root_backed_ext_vol_subvolume() {
-    local index=$1
-    local device=${ext_vol_devices[$index]:-}
-    local filesystem=${ext_vol_fs[$index]:-}
-    local options=${ext_vol_opts[$index]:-}
-    local luks_name=${ext_vol_luks[$index]:-}
-    local tpm2=${ext_vol_tpm[$index]:-false}
-    local tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
-    local tpm2_recovery=${ext_vol_recovery[$index]:-false}
-    local existing=${ext_vol_existing[$index]:-false}
-    local expected_prefix="root${physical_var_path:-}"
-    local subvolume=
-    local option_token
-    local -a root_backed_option_tokens=()
-
-    [[ $device == /dev/disk/by-label/root && $filesystem == btrfs && $existing == false ]] || return 1
-    [[ -z $luks_name && $tpm2 == false && -z $tpm2_pcrs &&
-        $tpm2_recovery == false ]] || return 1
-
-    IFS=, read -r -a root_backed_option_tokens <<< "$options"
-    for option_token in "${root_backed_option_tokens[@]}"; do
-        if [[ $option_token == subvol=* ]]; then
-            [[ -z $subvolume ]] || return 1
-            subvolume=${option_token#subvol=}
-        fi
-    done
-    [[ -n $subvolume && ($subvolume == "$expected_prefix" || $subvolume == "$expected_prefix"/*) ]] ||
-        return 1
-    printf '%s\n' "$subvolume"
-}
-
-is_root_backed_ext_vol() {
-    root_backed_ext_vol_subvolume "$1" >/dev/null
-}
-
 label_for_mount() {
     local mount_point=$1
     local filesystem=$2
@@ -229,190 +200,282 @@ validate_ext_vol_array_indexes() {
     if [[ $required == true ]]; then
         ((${#values[@]} == count)) || die "$name must match ext_vol_devices length"
         for ((index = 0; index < count; index++)); do
-            [[ -v "values[$index]" ]] || die "$name is missing required index: $index"
+            [[ ${values[$index]+set} == set ]] || die "$name is missing required index: $index"
         done
     fi
 }
 
-# Arrays in this function are initialized dynamically by ensure_indexed_array.
-# shellcheck disable=SC2154
-validate_ext_vol_config() {
-    local count=${#ext_vol_devices[@]}
-    local required_array optional_array
-    for required_array in ext_vol_devices ext_vol_mountpoint ext_vol_fs; do
-        validate_ext_vol_array_indexes "$required_array" "$count" true
-    done
-    for optional_array in ext_vol_luks ext_vol_opts ext_vol_tpm ext_vol_tpm_pcrs \
-        ext_vol_recovery ext_vol_existing; do
-        validate_ext_vol_array_indexes "$optional_array" "$count" false
-    done
+validate_storage_label() {
+    local label=$1 description=$2 limit=$3
+    [[ $label =~ ^[a-z0-9][a-z0-9_-]*$ ]] ||
+        die "$description must start with a lower-case letter or digit and contain only lower-case letters, digits, '_' or '-': $label"
+    ((${#label} <= limit)) || die "$description is too long (maximum $limit characters): $label"
+}
 
-    local root_luks_name=${luks_name:-root}
-    local -A seen_devices=() seen_labels=([boot_efi]=1 [boot]=1 [root]=1 [root_luks]=1) seen_paths=() seen_luks_names=()
-    local index device device_real mount_point filesystem encrypted label label_limit options luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery existing parent device_type credential_variable
-    local root_backed root_subvolume root_option_token
-    local -a root_option_tokens=()
-    seen_luks_names["$root_luks_name"]=1
-    if [[ $root_encrypted == true && -e /dev/mapper/$root_luks_name ]]; then
-        die "configured root LUKS mapping is already active: $root_luks_name"
+is_safe_relative_subvolume() {
+    local path=${1:-} component
+    [[ -n $path && $path != /* && $path != */ && $path != *//* ]] || return 1
+    [[ $path != *[[:space:]]* && $path != *,* && $path != *:* && $path != *$'\n'* ]] || return 1
+    IFS=/ read -r -a components <<< "$path"
+    for component in "${components[@]}"; do
+        [[ $component != . && $component != .. && -n $component ]] || return 1
+    done
+}
+
+validate_root_volume_config() {
+    validate_storage_label "$root_fs_label" root_fs_label 255
+    validate_storage_label "$root_partition_label" root_partition_label 36
+    validate_storage_label "$root_luks_label" root_luks_label 48
+    [[ $root_partition_label != boot && $root_partition_label != boot_efi ]] ||
+        die "root_partition_label must be distinct from the predefined boot partition labels"
+    [[ $root_fs_label != boot && $root_fs_label != boot_efi ]] ||
+        die "root_fs_label must be distinct from the predefined boot filesystem labels"
+    is_safe_relative_subvolume "$root_subvol" ||
+        die "root_subvol must be a normalized relative Btrfs subvolume path: $root_subvol"
+    if [[ $root_encrypted == true ]]; then
+        [[ $root_fs_label != "$root_luks_label" ]] ||
+            die "root_fs_label and root_luks_label must be distinct when root encryption is enabled"
     fi
-    ext_vol_labels_resolved=()
-    ext_vol_sources_resolved=()
-    ext_vol_luks_uuids=()
-    ext_vol_luks_labels=()
+}
+
+# Build aligned internal records from the public configuration arrays. Every
+# subsequent lifecycle phase operates on this normalized description.
+normalize_internal_volumes() {
+    local index record_index count=${#ext_vol_devices[@]}
+
+    vol_role=() vol_public_index=() vol_backing_index=() vol_device=() vol_parent_disk=()
+    vol_partition_index=() vol_partition_size=() vol_partition_type=()
+    vol_partition_label=() vol_mountpoint=() vol_fs=() vol_fs_label=()
+    vol_opts=() vol_luks=() vol_luks_label=() vol_tpm=() vol_tpm_pcrs=()
+    vol_recovery=() vol_existing=() vol_subvol=() vol_subvol_create=()
+    vol_install_phase=() vol_source_resolved=() vol_luks_uuid_resolved=()
+    vol_partition_resolved=() vol_label_resolved=()
+
+    vol_role[0]=efi; vol_public_index[0]=-1; vol_backing_index[0]=
+    vol_device[0]=/dev/disk/by-partlabel/boot_efi; vol_parent_disk[0]=${target_disk_real:-${target_disk:-}}
+    vol_partition_index[0]=1; vol_partition_size[0]=$efi_size_mib
+    vol_partition_type[0]=EF00; vol_partition_label[0]=boot_efi
+    vol_mountpoint[0]=/boot/efi; vol_fs[0]=vfat; vol_fs_label[0]=boot_efi
+    vol_opts[0]=defaults; vol_luks[0]=; vol_luks_label[0]=
+    vol_tpm[0]=false; vol_tpm_pcrs[0]=; vol_recovery[0]=false
+    vol_existing[0]=false; vol_subvol[0]=; vol_subvol_create[0]=false
+    vol_install_phase[0]=predeploy; vol_partition_resolved[0]=${efi_partition:-}
+
+    vol_role[1]=boot; vol_public_index[1]=-1; vol_backing_index[1]=
+    vol_device[1]=/dev/disk/by-partlabel/boot; vol_parent_disk[1]=${target_disk_real:-${target_disk:-}}
+    vol_partition_index[1]=2; vol_partition_size[1]=$boot_size_mib
+    vol_partition_type[1]=BC13C2FF-59E6-4262-A352-B275FD6F7172
+    vol_partition_label[1]=boot; vol_mountpoint[1]=/boot; vol_fs[1]=ext4
+    vol_fs_label[1]=boot; vol_opts[1]=defaults; vol_luks[1]=; vol_luks_label[1]=
+    vol_tpm[1]=false; vol_tpm_pcrs[1]=; vol_recovery[1]=false
+    vol_existing[1]=false; vol_subvol[1]=; vol_subvol_create[1]=false
+    vol_install_phase[1]=predeploy; vol_partition_resolved[1]=${boot_partition:-}
+
+    vol_role[2]=root; vol_public_index[2]=-1; vol_backing_index[2]=
+    vol_device[2]=/dev/disk/by-partlabel/$root_partition_label
+    vol_parent_disk[2]=${target_disk_real:-${target_disk:-}}; vol_partition_index[2]=3
+    vol_partition_size[2]=remainder; vol_partition_type[2]=$(root_partition_guid)
+    vol_partition_label[2]=$root_partition_label; vol_mountpoint[2]=/
+    vol_fs[2]=btrfs; vol_fs_label[2]=$root_fs_label; vol_opts[2]=subvol=$root_subvol,$root_mount_options
+    vol_luks[2]=; [[ $root_encrypted == true ]] && vol_luks[2]=$luks_name
+    vol_luks_label[2]=$root_luks_label; vol_tpm[2]=$root_tpm2
+    vol_tpm_pcrs[2]=$root_tpm2_pcrs; vol_recovery[2]=$root_tpm2_recovery
+    vol_existing[2]=false; vol_subvol[2]=$root_subvol; vol_subvol_create[2]=true
+    vol_install_phase[2]=predeploy; vol_partition_resolved[2]=${root_partition:-}
+    vol_source_resolved[2]=/dev/disk/by-label/$root_fs_label
+    vol_label_resolved[2]=$root_fs_label
+
     for ((index = 0; index < count; index++)); do
-        device=${ext_vol_devices[$index]}
-        mount_point=${ext_vol_mountpoint[$index]}
-        filesystem=${ext_vol_fs[$index]}
-        luks_name=${ext_vol_luks[$index]:-}
-        encrypted=false
-        [[ -n $luks_name ]] && encrypted=true
-        tpm2=${ext_vol_tpm[$index]:-false}
-        tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
-        tpm2_recovery=${ext_vol_recovery[$index]:-false}
-        existing=${ext_vol_existing[$index]:-false}
-        options=${ext_vol_opts[$index]:-defaults}
-
-        root_backed=false
-        if root_subvolume=$(root_backed_ext_vol_subvolume "$index"); then
-            root_backed=true
-        fi
-
-        [[ $device == /dev/* ]] || die "ext_vol_devices[$index] must be a /dev node path"
-        if [[ $root_backed == false ]]; then
-            device_real=$(readlink -f -- "$device")
-            [[ -b $device_real ]] || die "external volume device is not a block device: $device"
-            device_type=$(lsblk -ndo TYPE "$device_real")
-            if [[ $existing == false ]]; then
-                [[ $device_type == disk ]] || die "external volume device must be a whole disk: $device"
-            else
-                case "$device_type" in
-                    disk | part | lvm | crypt | dm) ;;
-                    *) die "existing external volume device must be a disk, partition, LV, or mapper: $device" ;;
-                esac
-            fi
-            if [[ $device_real == "$target_disk_real" ]] || device_is_descendant_of "$device_real" "$target_disk_real"; then
-                die "external volume device reuses target_disk: $device"
-            fi
-            [[ -z ${seen_devices[$device_real]:-} ]] || die "external volume device is listed more than once: $device"
-            seen_devices[$device_real]=1
-
-            parent=$(lsblk -nrpo MOUNTPOINTS "$device_real" | awk 'NF { print; exit }')
-            [[ -z $parent ]] || die "external volume disk has a mounted filesystem at $parent"
-            parent=$(lsblk -nrpo TYPE "$device_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
-            if [[ $existing == false ]]; then
-                [[ -z $parent ]] || die "external volume disk has an active mapped descendant of type $parent"
-            else
-                [[ $device_type != crypt && $device_type != dm ]] || [[ -z $luks_name ]] ||
-                    die "existing encrypted external volume must use its underlying block device: $device"
-                parent=$(lsblk -nrpo TYPE "$device_real" | awk 'NR > 1 && $1 ~ /^(crypt|lvm|raid)/ { print; exit }')
-                [[ -z $parent ]] ||
-                    die "existing external volume has an active mapped descendant of type $parent"
-            fi
-        fi
-
-        [[ $mount_point == /* ]] || die "external volume mountpoint must be absolute: $mount_point"
-        is_normalized_absolute_path "$mount_point" || die "external volume mountpoint is not normalized: $mount_point"
-        if [[ $existing == true ]]; then
-            [[ $device != *:* && $device != *$'\n'* ]] ||
-                die "existing external volume device cannot contain ':' or a newline: $device"
-        fi
-        case "$mount_point" in
-            /usr/local | /usr/local/*) ;;
-            / | /boot | /boot/* | /etc | /etc/* | /usr | /usr/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/* | /sysroot | /sysroot/*)
-                die "external volume mountpoint is not a supported stateful path: $mount_point"
-                ;;
-        esac
-        validate_backend_mount_target "$mount_point"
-        [[ -z ${seen_paths[$mount_point]:-} ]] || die "external volume mountpoint is listed more than once: $mount_point"
-        seen_paths[$mount_point]=1
-
-        if [[ $existing == false ]]; then
-            case "$filesystem" in
-                btrfs) require_commands mkfs.btrfs ;;
-                ext4) require_commands mkfs.ext4 ;;
-                xfs) require_commands mkfs.xfs ;;
-                *) die "ext_vol_fs[$index] must be btrfs, ext4, or xfs" ;;
-            esac
-        else
-            [[ -n $filesystem ]] || die "ext_vol_fs[$index] must not be empty for an existing volume"
-        fi
-        [[ $filesystem != *:* && $filesystem != *$'\n'* ]] ||
-            die "ext_vol_fs[$index] cannot contain ':' or a newline"
-        if [[ $root_backed == true ]]; then
-            IFS=, read -r -a root_option_tokens <<< "$options"
-            for root_option_token in "${root_option_tokens[@]}"; do
-                [[ $root_option_token != ro && $root_option_token != subvolid=* ]] ||
-                    die "external volume options for $mount_point cannot contain installer-incompatible option: $root_option_token"
-            done
-        elif [[ $existing == false ]]; then
-            validate_created_mount_options "$options" "$filesystem" "external volume options for $mount_point"
-        fi
-        [[ $options != *:* ]] || die "external volume options cannot contain ':': $mount_point"
-        is_boolean "$tpm2" || die "ext_vol_tpm[$index] must be true or false"
-        is_boolean "$tpm2_recovery" || die "ext_vol_recovery[$index] must be true or false"
-        is_boolean "$existing" || die "ext_vol_existing[$index] must be true or false"
-        ext_vol_existing[index]=$existing
-        [[ $tpm2_pcrs != *$'\n'* ]] || die "ext_vol_tpm_pcrs[$index] cannot contain a newline"
-        if [[ $tpm2 == true ]]; then
-            [[ $encrypted == true ]] || die "TPM enrollment requires encryption for external volume: $mount_point"
-            tpm_enrollment_requested=true
-        elif [[ $tpm2_recovery == true ]]; then
-            die "TPM recovery enrollment requires ext_vol_tpm[$index]=true: $mount_point"
-        elif [[ -n $tpm2_pcrs ]]; then
-            die "ext_vol_tpm_pcrs[$index] requires ext_vol_tpm[$index]=true"
-        fi
-
-        if [[ $root_backed == true ]]; then
-            label=root
-        elif [[ $existing == false ]]; then
-            label=$(label_for_mount "$mount_point" "$filesystem")
-        else
-            ext_vol_sources_resolved[index]=$device
-        fi
-        if [[ $existing == false ]]; then
-            [[ $label =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "external volume label must be lower case: $label"
-            label_limit=$(filesystem_label_limit "$filesystem")
-            ((${#label} <= label_limit)) || die "$filesystem label is too long for $mount_point: $label"
-            if [[ $root_backed == true ]]; then
-                [[ $label == root ]] || die "root-backed external volume must use label root: $mount_point"
-            else
-                [[ -z ${seen_labels[$label]:-} ]] || die "external volume label is duplicated: $label"
-                seen_labels[$label]=1
-                assert_label_available "/dev/disk/by-label/$label" "$device_real"
-            fi
-            ext_vol_labels_resolved[index]=$label
-            ext_vol_sources_resolved[index]=/dev/disk/by-label/$label
-        fi
-
-        if [[ $encrypted == true ]]; then
-            [[ $luks_name =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "ext_vol_luks[$index] must be lower case: $luks_name"
-            credential_variable=lvc_$luks_name
-            [[ $credential_variable =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] ||
-                die "ext_vol_luks[$index] does not produce a valid credential variable: $luks_name"
-            ((${#luks_name} <= 127)) || die "external volume LUKS mapping name is too long: $luks_name"
-            [[ -z ${seen_luks_names[$luks_name]:-} ]] || die "external volume LUKS mapping name is duplicated: $luks_name"
-            [[ ! -e /dev/mapper/$luks_name ]] || die "external volume LUKS mapping is already active: $luks_name"
-            seen_luks_names[$luks_name]=1
-            if [[ $existing == false ]]; then
-                luks_label=${label:0:43}_luks
-                [[ -z ${seen_labels[$luks_label]:-} ]] || die "external volume LUKS label is duplicated: $luks_label"
-                seen_labels[$luks_label]=1
-                assert_label_available "/dev/disk/by-label/$luks_label" "$device_real"
-                ext_vol_luks_labels[index]=$luks_label
-            fi
+        record_index=$((index + 3))
+        vol_role[record_index]=ext
+        vol_public_index[record_index]=$index
+        vol_backing_index[record_index]=
+        vol_device[record_index]=${ext_vol_devices[$index]}
+        vol_parent_disk[record_index]=
+        vol_partition_index[record_index]=
+        vol_partition_size[record_index]=
+        vol_partition_type[record_index]=
+        vol_partition_label[record_index]=
+        vol_mountpoint[record_index]=${ext_vol_mountpoint[$index]}
+        vol_fs[record_index]=${ext_vol_fs[$index]}
+        vol_fs_label[record_index]=
+        vol_opts[record_index]=${ext_vol_opts[$index]:-defaults}
+        vol_luks[record_index]=${ext_vol_luks[$index]:-}
+        vol_luks_label[record_index]=
+        vol_tpm[record_index]=${ext_vol_tpm[$index]:-false}
+        vol_tpm_pcrs[record_index]=${ext_vol_tpm_pcrs[$index]:-}
+        vol_recovery[record_index]=${ext_vol_recovery[$index]:-false}
+        vol_existing[record_index]=${ext_vol_existing[$index]:-false}
+        vol_subvol[record_index]=${ext_vol_subvol[$index]:-}
+        vol_subvol_create[record_index]=${ext_vol_subvol_create[$index]:-false}
+        vol_install_phase[record_index]=postdeploy
+        # A root-labelled Btrfs subvolume is a relation to the root record,
+        # not another destructive device.  The relation is resolved once here
+        # and is consumed by every later storage phase.
+        if vol_is_root_relation "$record_index"; then
+            vol_backing_index[record_index]=2
+            vol_source_resolved[record_index]=/dev/disk/by-label/$root_fs_label
+            vol_fs_label[record_index]=$root_fs_label
+            vol_label_resolved[record_index]=$root_fs_label
         fi
     done
+}
 
-    local earlier
+vol_is_root_relation() {
+    local index=$1 subvolume=${vol_subvol[$1]:-}
+    [[ ${vol_device[$index]:-} == /dev/disk/by-label/$root_fs_label &&
+        ${vol_fs[$index]:-} == btrfs && -z ${vol_luks[$index]:-} &&
+        ${vol_tpm[$index]:-false} == false && -z ${vol_tpm_pcrs[$index]:-} &&
+        ${vol_recovery[$index]:-false} == false ]] || return 1
+    [[ $subvolume == "$root_subvol" || $subvolume == "$root_subvol"/* ]]
+}
+
+vol_validate_device() {
+    local index=$1 device=${vol_device[$1]} existing=${vol_existing[$1]:-false}
+    local real type mounted mapped
+    vol_is_root_relation "$index" && return 0
+    real=$(readlink -f -- "$device")
+    [[ -b $real ]] || die "external volume device is not a block device: $device"
+    type=$(lsblk -ndo TYPE "$real")
+    if [[ $existing == false ]]; then
+        [[ $type == disk ]] || die "external volume device must be a whole disk: $device"
+    else
+        case "$type" in disk | part | lvm | crypt | dm) ;; *) die "existing external volume device must be a disk, partition, LV, or mapper: $device" ;; esac
+        if [[ -n ${vol_luks[$index]:-} ]]; then
+            case $type in crypt | dm) die "existing encrypted external volume must use its underlying block device: $device" ;; esac
+        fi
+    fi
+    if [[ $real == "$target_disk_real" ]] || device_is_descendant_of "$real" "$target_disk_real"; then
+        die "external volume device reuses target_disk: $device"
+    fi
+    mounted=$(lsblk -nrpo MOUNTPOINTS "$real" | awk 'NF { print; exit }')
+    [[ -z $mounted ]] || die "external volume disk has a mounted filesystem at $mounted"
+    mapped=$(lsblk -nrpo TYPE "$real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
+    [[ -z $mapped ]] || die "external volume disk has an active mapped descendant of type $mapped"
+    [[ ${volume_seen_devices[$real]:-} != 1 ]] || die "external volume device is listed more than once: $device"
+    volume_seen_devices[$real]=1
+}
+
+vol_validate_mount_target() {
+    local index=$1 point=${vol_mountpoint[$1]}
+    is_normalized_absolute_path "$point" || die "external volume mountpoint must be absolute and normalized: $point"
+    case ${vol_device[$index]} in *:* | *$'\n'*) die "external volume device cannot contain ':' or a newline: ${vol_device[$index]}" ;; esac
+    case "$point" in
+        /usr/local | /usr/local/*) ;; / | /boot | /boot/* | /etc | /etc/* | /usr | /usr/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/* | /sysroot | /sysroot/* | /state | /state/*) die "external volume mountpoint is not a supported stateful path: $point" ;;
+    esac
+    validate_backend_mount_target "$point"
+    [[ ${volume_seen_paths[$point]:-} != 1 ]] || die "external volume mountpoint is listed more than once: $point"
+    volume_seen_paths[$point]=1
+}
+
+vol_validate_mount_format() {
+    local index=$1 point=${vol_mountpoint[$1]} fs=${vol_fs[$1]} existing=${vol_existing[$1]:-false}
+    local opts=${vol_opts[$1]:-defaults} subvol=${vol_subvol[$1]:-}
+    local public_index=${vol_public_index[$1]:-$1}
+    is_boolean "${vol_subvol_create[$index]:-false}" ||
+        die "ext_vol_subvol_create[$public_index] must be true or false"
+    if [[ $existing == false ]]; then
+        case "$fs" in btrfs | ext4 | xfs) ;; *) die "external volume filesystem must be btrfs, ext4, or xfs: $point" ;; esac
+        validate_created_mount_options "$opts" "$fs" "external volume options for $point"
+    else
+        [[ -n $fs ]] || die "external volume filesystem must not be empty for an existing volume: $point"
+    fi
+    case $fs in *:* | *$'\n'*) die "external volume filesystem cannot contain ':' or a newline" ;; esac
+    [[ $opts != *:* ]] || die "external volume options cannot contain ':': $point"
+    if [[ -n $subvol ]]; then
+        [[ $fs == btrfs ]] || die "external volume subvolume requires a Btrfs filesystem: $point"
+        is_safe_relative_subvolume "$subvol" || die "external volume subvolume must be a normalized relative Btrfs subvolume path: $subvol"
+        case $opts in subvol=* | *,subvol=* | subvolid=* | *,subvolid=*) die "external volume options cannot contain subvol= or subvolid= when ext_vol_subvol is set" ;; esac
+    fi
+    if [[ ${vol_subvol_create[$index]:-false} == true ]]; then
+        [[ -n $subvol ]] || die "ext_vol_subvol_create[$public_index] requires ext_vol_subvol[$public_index]"
+    fi
+}
+
+vol_validate_mount() {
+    vol_validate_mount_target "$1"
+    vol_validate_mount_format "$1"
+}
+
+vol_validate_crypto() {
+    local index=$1 luks=${vol_luks[$1]:-} tpm=${vol_tpm[$1]:-false} recovery=${vol_recovery[$1]:-false}
+    local existing=${vol_existing[$1]:-false} point=${vol_mountpoint[$1]}
+    local public_index=${vol_public_index[$1]:-$1}
+    is_boolean "$tpm" || die "ext_vol_tpm[$public_index] must be true or false"
+    is_boolean "$recovery" || die "ext_vol_recovery[$public_index] must be true or false"
+    is_boolean "$existing" || die "ext_vol_existing[$public_index] must be true or false"
+    vol_existing[index]=$existing
+    [[ ${vol_tpm_pcrs[$index]:-} != *$'\n'* ]] || die "ext_vol_tpm_pcrs[$public_index] cannot contain a newline"
+    if [[ $tpm == true ]]; then
+        [[ -n $luks ]] || die "TPM enrollment requires encryption for external volume: $point"
+        tpm_enrollment_requested=true
+    elif [[ $recovery == true ]]; then
+        die "TPM recovery enrollment requires ext_vol_tpm[$public_index]=true: $point"
+    elif [[ -n ${vol_tpm_pcrs[$index]:-} ]]; then
+        die "ext_vol_tpm_pcrs[$public_index] requires ext_vol_tpm[$public_index]=true"
+    fi
+    [[ -z $luks ]] && return 0
+    [[ $luks =~ ^[a-z0-9][a-z0-9_]*$ ]] || die "ext_vol_luks[$public_index] must be lower case: $luks"
+    ((${#luks} <= 127)) || die "external volume LUKS mapping name is too long: $luks"
+    [[ -z ${volume_seen_luks[$luks]:-} ]] || die "external volume LUKS mapping name is duplicated: $luks"
+    [[ ! -e /dev/mapper/$luks ]] || die "external volume LUKS mapping is already active: $luks"
+    volume_seen_luks[$luks]=1
+}
+
+vol_resolve_record() {
+    local index=$1 fs=${vol_fs[$1]} point=${vol_mountpoint[$1]} label
+    local existing=${vol_existing[$1]:-false}
+    if vol_is_root_relation "$index"; then
+        vol_source_resolved[index]=/dev/disk/by-label/$root_fs_label
+        vol_fs_label[index]=$root_fs_label
+        vol_label_resolved[index]=$root_fs_label
+        return 0
+    fi
+    [[ $existing == true ]] && { vol_source_resolved[index]=${vol_device[$index]}; return 0; }
+    label=$(label_for_mount "$point" "$fs")
+    [[ -z ${volume_seen_labels[$label]:-} ]] || die "external volume label is duplicated: $label"
+    volume_seen_labels[$label]=1
+    assert_label_available "/dev/disk/by-label/$label" "$(readlink -f -- "${vol_device[$index]}")"
+    vol_fs_label[index]=$label
+    vol_label_resolved[index]=$label
+    vol_source_resolved[index]=/dev/disk/by-label/$label
+    if [[ -n ${vol_luks[$index]:-} ]]; then
+        local luks_label=${label:0:43}_luks
+        [[ -z ${volume_seen_labels[$luks_label]:-} ]] || die "external volume LUKS label is duplicated: $luks_label"
+        volume_seen_labels[$luks_label]=1
+        vol_luks_label[index]=$luks_label
+    fi
+}
+
+validate_vol_config() {
+    local count=${#ext_vol_devices[@]} index earlier record_index required optional
+    validate_root_volume_config
+    for required in ext_vol_devices ext_vol_mountpoint ext_vol_fs; do validate_ext_vol_array_indexes "$required" "$count" true; done
+    for optional in ext_vol_luks ext_vol_opts ext_vol_tpm ext_vol_tpm_pcrs ext_vol_recovery ext_vol_existing ext_vol_subvol ext_vol_subvol_create; do validate_ext_vol_array_indexes "$optional" "$count" false; done
+    local -A volume_seen_devices=() volume_seen_labels=([boot_efi]=1 [boot]=1 ["$root_fs_label"]=1 ["$root_luks_label"]=1) volume_seen_paths=() volume_seen_luks=()
+    volume_seen_luks["${luks_name:-root}"]=1
+    if [[ $root_encrypted == true && -e /dev/mapper/${luks_name:-root} ]]; then
+        die "configured root LUKS mapping is already active: ${luks_name:-root}"
+    fi
+    normalize_internal_volumes
     for ((index = 0; index < count; index++)); do
+        record_index=$((index + 3))
+        vol_validate_device "$record_index"
+        vol_validate_mount "$record_index"
+        vol_validate_crypto "$record_index"
+        if [[ ${vol_existing[$record_index]} == false && ${vol_fs[$record_index]} == xfs ]]; then
+            require_commands mkfs.xfs
+        fi
+        vol_resolve_record "$record_index"
+    done
+    for ((index = 0; index < count; index++)); do
+        record_index=$((index + 3))
         for ((earlier = 0; earlier < index; earlier++)); do
-            if [[ ${ext_vol_mountpoint[$earlier]} == "${ext_vol_mountpoint[$index]}"/* ]]; then
-                die "parent external volume ${ext_vol_mountpoint[$index]} must precede ${ext_vol_mountpoint[$earlier]}"
-            fi
+            local earlier_record=$((earlier + 3))
+            [[ ${vol_mountpoint[$earlier_record]} != "${vol_mountpoint[$record_index]}"/* ]] ||
+                die "parent external volume ${vol_mountpoint[$earlier_record]} must precede ${vol_mountpoint[$record_index]}"
         done
     done
-
 }
 initialize_recovery_key_output() {
     [[ -n $recovery_key_output_file ]] || return 0
@@ -515,23 +578,7 @@ remove_temporary_luks_key() {
     done
 }
 
-materialize_external_credential() {
-    local output_name=$1
-    local variable_name=$2
-    local credential=${!variable_name-}
-    local credential_file=
-
-    if [[ -n $credential ]]; then
-        credential_file=$(mktemp "$work_root/ext-vol-key.XXXXXX")
-        chmod 0600 "$credential_file"
-        printf '%s' "$credential" >"$credential_file"
-        temporary_credential_files+=("$credential_file")
-    fi
-    external_credential_variables+=("$variable_name")
-    printf -v "$output_name" '%s' "$credential_file"
-}
-
-remove_external_credential() {
+vol_remove_credential() {
     local variable_name=$1
     unset "$variable_name"
 }
@@ -547,45 +594,6 @@ remove_temporary_credential() {
             unset 'temporary_credential_files[index]'
             break
         fi
-    done
-}
-
-prepare_existing_ext_volumes() {
-    local count=${#ext_vol_devices[@]}
-    ((count > 0)) || return 0
-
-    local index device device_real luks_name credential_variable key_file uuid
-    for ((index = 0; index < count; index++)); do
-        [[ ${ext_vol_existing[$index]:-false} == true ]] || continue
-        is_root_backed_ext_vol "$index" && continue
-        luks_name=${ext_vol_luks[$index]:-}
-        if [[ -z $luks_name ]]; then
-            ext_vol_sources_resolved[index]=${ext_vol_devices[$index]}
-            continue
-        fi
-
-        device=${ext_vol_devices[$index]}
-        device_real=$(readlink -f -- "$device")
-        credential_variable=lvc_$luks_name
-        key_file=
-        materialize_external_credential key_file "$credential_variable"
-        if [[ -n $key_file ]]; then
-            log "Opening existing external LUKS volume $luks_name using its configured credential"
-            cryptsetup open --type luks --key-file "$key_file" "$device_real" "$luks_name"
-        else
-            log "Opening existing external LUKS volume $luks_name; enter its passphrase when prompted"
-            cryptsetup open --type luks "$device_real" "$luks_name"
-        fi
-        opened_luks_names+=("$luks_name")
-        uuid=$(cryptsetup luksUUID "$device_real")
-        [[ -n $uuid ]] || die "could not determine existing external LUKS UUID: $device"
-        ext_vol_luks_uuids[index]=$uuid
-        ext_vol_sources_resolved[index]=/dev/mapper/$luks_name
-        enroll_luks_credentials "${ext_vol_mountpoint[$index]}" "$device_real" "$uuid" \
-            "${ext_vol_tpm[$index]:-false}" "${ext_vol_tpm_pcrs[$index]:-}" \
-            "${ext_vol_recovery[$index]:-false}" "$key_file"
-        [[ -z $key_file ]] || remove_temporary_credential "$key_file"
-        remove_external_credential "$credential_variable"
     done
 }
 
@@ -635,77 +643,41 @@ verify_partition_path() {
     [[ $parent == "$target_disk_real" ]] || die "$path does not belong to $target_disk"
 }
 
-prepare_partitions() {
-    log "Preparing GPT on $target_disk ($target_disk_real)"
-    lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$target_disk_real"
-    assert_label_available /dev/disk/by-partlabel/boot_efi
-    assert_label_available /dev/disk/by-partlabel/boot
-    assert_label_available /dev/disk/by-partlabel/root
-    assert_label_available /dev/disk/by-label/boot_efi
-    assert_label_available /dev/disk/by-label/boot
-    assert_label_available /dev/disk/by-label/root
-    if [[ $root_encrypted == true ]]; then
-        assert_label_available /dev/disk/by-label/root_luks
-    fi
-
-    wipefs --all --force "$target_disk_real"
-    sgdisk --zap-all "$target_disk_real"
-    sgdisk \
-        --new=1:0:+"${efi_size_mib}"MiB --typecode=1:EF00 --change-name=1:boot_efi \
-        --new=2:0:+"${boot_size_mib}"MiB --typecode=2:BC13C2FF-59E6-4262-A352-B275FD6F7172 --change-name=2:boot \
-        --new=3:0:0 --typecode=3:"$(root_partition_guid)" --change-name=3:root \
-        "$target_disk_real"
-
-    udevadm settle
-    wait_for_device /dev/disk/by-partlabel/boot_efi
-    wait_for_device /dev/disk/by-partlabel/boot
-    wait_for_device /dev/disk/by-partlabel/root
-    verify_partition_path /dev/disk/by-partlabel/boot_efi
-    verify_partition_path /dev/disk/by-partlabel/boot
-    verify_partition_path /dev/disk/by-partlabel/root
-
-    efi_partition=/dev/disk/by-partlabel/boot_efi
-    boot_partition=/dev/disk/by-partlabel/boot
-    root_partition=/dev/disk/by-partlabel/root
+vol_clear_parent() {
+    local parent=$1
+    log "Erasing storage parent $parent"
+    lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$parent"
+    wipefs --all --force "$parent"
+    sgdisk --zap-all "$parent"
 }
 
-format_filesystems() {
-    log "Formatting boot filesystems"
-    mkfs.vfat -F 32 -n boot_efi "$efi_partition"
-    efi_filesystem_uuid=$(blkid -s UUID -o value "$efi_partition")
-    [[ -n $efi_filesystem_uuid ]] || die "could not determine EFI filesystem UUID"
-    mkfs.ext4 -F -L boot "$boot_partition"
-    boot_filesystem_uuid=$(blkid -s UUID -o value "$boot_partition")
-    [[ -n $boot_filesystem_uuid ]] || die "could not determine /boot filesystem UUID"
-
-    root_block_device=$root_partition
-    if [[ $root_encrypted == true ]]; then
-        local root_key_file=
-        luks_key_file_for_volume root_key_file
-        if [[ -n $root_key_file ]]; then
-            log "Creating LUKS2 container labeled root_luks using a key file"
-            cryptsetup luksFormat --batch-mode --type luks2 --label root_luks --key-file "$root_key_file" "$root_partition"
-            cryptsetup open --type luks --key-file "$root_key_file" "$root_partition" "$luks_name"
-        else
-            log "Creating LUKS2 container labeled root_luks; enter its initial passphrase when prompted"
-            cryptsetup luksFormat --type luks2 --label root_luks "$root_partition"
-            log "Opening root_luks; enter its passphrase when prompted"
-            cryptsetup open --type luks "$root_partition" "$luks_name"
-        fi
-        root_luks_uuid=$(cryptsetup luksUUID "$root_partition")
-        opened_luks_names+=("$luks_name")
-        root_block_device=/dev/mapper/$luks_name
-        enroll_luks_credentials root "$root_partition" "$root_luks_uuid" "$root_tpm2" "$root_tpm2_pcrs" "$root_tpm2_recovery" "$root_key_file"
-        if [[ $luks_ephemeral_key == true ]]; then
-            systemd-cryptenroll --wipe-slot=password "$root_partition"
-            remove_temporary_luks_key "$root_key_file"
-        fi
-    fi
-
-    log "Creating Btrfs filesystem labeled root"
-    mkfs.btrfs -f -L root "$root_block_device"
+vol_prepare_partitions() {
+    local -A parents=()
+    local parent index size
+    local -a args=()
+    for index in "${!vol_role[@]}"; do
+        parent=${vol_parent_disk[$index]:-}
+        [[ -n ${vol_partition_index[$index]:-} && -n $parent ]] || continue
+        parents[$parent]=1
+    done
+    for parent in "${!parents[@]}"; do
+        vol_clear_parent "$parent"
+        args=()
+        for index in "${!vol_role[@]}"; do
+            [[ ${vol_parent_disk[$index]:-} == "$parent" && -n ${vol_partition_index[$index]:-} ]] || continue
+            size=${vol_partition_size[$index]}
+            if [[ $size == remainder ]]; then args+=("--new=${vol_partition_index[$index]}:0:0"); else args+=("--new=${vol_partition_index[$index]}:0:+${size}MiB"); fi
+            args+=("--typecode=${vol_partition_index[$index]}:${vol_partition_type[$index]}" "--change-name=${vol_partition_index[$index]}:${vol_partition_label[$index]}")
+        done
+        sgdisk "${args[@]}" "$parent"
+    done
     udevadm settle
-    wait_for_device /dev/disk/by-label/root
+    for index in "${!vol_role[@]}"; do
+        [[ -n ${vol_partition_index[$index]:-} ]] || continue
+        vol_partition_resolved[index]=/dev/disk/by-partlabel/${vol_partition_label[$index]}
+        wait_for_device "${vol_partition_resolved[$index]}"
+        verify_partition_path "${vol_partition_resolved[$index]}"
+    done
 }
 
 enroll_luks_credentials() {
@@ -741,111 +713,174 @@ enroll_luks_credentials() {
     systemd-cryptenroll "${unlock_args[@]}" "${enroll_args[@]}" "$device"
 }
 
-format_ext_vol_filesystem() {
-    local filesystem=$1
-    local label=$2
-    local device=$3
-    case "$filesystem" in
+vol_format_filesystem() {
+    local index=$1 device=$2 fs=${vol_fs[$1]} label=${vol_fs_label[$1]}
+    case "$fs" in
         btrfs) mkfs.btrfs -f -L "$label" "$device" ;;
         ext4) mkfs.ext4 -F -L "$label" "$device" ;;
         xfs) mkfs.xfs -f -L "$label" "$device" ;;
-        *) die "unsupported external filesystem: $filesystem" ;;
+        vfat) mkfs.vfat -F 32 -n "$label" "$device" ;;
+        *) die "unsupported filesystem: $fs" ;;
     esac
 }
 
-prepare_ext_vol_filesystems() {
-    local count=${#ext_vol_devices[@]}
-    ((count > 0)) || return 0
+vol_materialize_credential() {
+    local output_name=$1 variable_name=$2
+    local credential=${!variable_name-} file=''
+    if [[ -n $credential ]]; then
+        file=$(mktemp "$work_root/vol-key.XXXXXX"); chmod 0600 "$file"; printf '%s' "$credential" >"$file"; temporary_credential_files+=("$file")
+    fi
+    external_credential_variables+=("$variable_name")
+    printf -v "$output_name" '%s' "$file"
+}
 
-    log "Preparing $count external volume(s)"
-    local index device device_real mount_point filesystem encrypted label luks_name luks_label tpm2 tpm2_pcrs tpm2_recovery block_device uuid key_file
-    for ((index = 0; index < count; index++)); do
-        if is_root_backed_ext_vol "$index"; then
-            log "Using root-backed Btrfs subvolume for ${ext_vol_mountpoint[$index]}"
-            continue
-        fi
-        [[ ${ext_vol_existing[$index]:-false} == false ]] || continue
-        device=${ext_vol_devices[$index]}
-        device_real=$(readlink -f -- "$device")
-        mount_point=${ext_vol_mountpoint[$index]}
-        filesystem=${ext_vol_fs[$index]}
-        luks_name=${ext_vol_luks[$index]:-}
-        encrypted=false
-        [[ -n $luks_name ]] && encrypted=true
-        tpm2=${ext_vol_tpm[$index]:-false}
-        tpm2_pcrs=${ext_vol_tpm_pcrs[$index]:-}
-        tpm2_recovery=${ext_vol_recovery[$index]:-false}
-        label=${ext_vol_labels_resolved[$index]}
+vol_activate_luks() {
+    local index=$1 existing=${vol_existing[$1]:-false} name=${vol_luks[$1]} device key_file='' uuid=''
+    local -a open_args=(--type luks) format_args=(--type luks2 --label "${vol_luks_label[$index]}")
+    device=${vol_partition_resolved[$index]:-${vol_device[$index]}}
+    if [[ $existing == true ]]; then
+        device=$(readlink -f -- "$device")
+        vol_materialize_credential key_file "lvc_$name"
+    else
+        luks_key_file_for_volume key_file
+        [[ -z $key_file ]] || format_args+=(--batch-mode --key-file "$key_file")
+        log "Creating LUKS2 container ${vol_luks_label[$index]}"
+        cryptsetup luksFormat "${format_args[@]}" "$device"
+    fi
+    [[ -z $key_file ]] || open_args+=(--key-file "$key_file")
+    cryptsetup open "${open_args[@]}" "$device" "$name"
+    opened_luks_names+=("$name")
+    uuid=$(cryptsetup luksUUID "$device")
+    [[ -n $uuid ]] || die "could not determine LUKS UUID for ${vol_mountpoint[$index]}"
+    vol_luks_uuid_resolved[index]=$uuid
+    vol_source_resolved[index]=/dev/mapper/$name
+    enroll_luks_credentials "${vol_mountpoint[$index]}" "$device" "$uuid" "${vol_tpm[$index]}" "${vol_tpm_pcrs[$index]}" "${vol_recovery[$index]}" "$key_file"
+    if [[ $existing == false && $luks_ephemeral_key == true ]]; then
+        systemd-cryptenroll --wipe-slot=password "$device"
+        remove_temporary_luks_key "$key_file"
+    fi
+    [[ $existing == true ]] || return 0
+    [[ -z $key_file ]] || remove_temporary_credential "$key_file"
+    vol_remove_credential "lvc_$name"
+}
 
-        log "Erasing $device and creating $filesystem for $mount_point"
-        lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$device_real"
-        wipefs --all --force "$device_real"
-        sgdisk --zap-all "$device_real"
-        udevadm settle
+vol_verify_subvolume() {
+    local index=$1 source=${vol_source_resolved[$1]:-} type
+    [[ -n ${vol_subvol[$index]:-} ]] || return 0
+    type=$(blkid -s TYPE -o value "$source")
+    [[ $type == btrfs ]] || die "external volume subvolume requires a Btrfs backing filesystem at ${vol_mountpoint[$index]} (found ${type:-unknown})"
+}
 
-        block_device=$device_real
-        if [[ $encrypted == true ]]; then
-            luks_label=${ext_vol_luks_labels[$index]}
-            key_file=
-            luks_key_file_for_volume key_file
-            if [[ -n $key_file ]]; then
-                log "Creating LUKS2 container $luks_label using a key file"
-                cryptsetup luksFormat --batch-mode --type luks2 --label "$luks_label" --key-file "$key_file" "$device_real"
-                cryptsetup open --type luks --key-file "$key_file" "$device_real" "$luks_name"
-            else
-                log "Creating LUKS2 container $luks_label; enter its initial passphrase when prompted"
-                cryptsetup luksFormat --type luks2 --label "$luks_label" "$device_real"
-                log "Opening $luks_label; enter its passphrase when prompted"
-                cryptsetup open --type luks "$device_real" "$luks_name"
-            fi
-            uuid=$(cryptsetup luksUUID "$device_real")
-            opened_luks_names+=("$luks_name")
-            ext_vol_luks_uuids[index]=$uuid
-            block_device=/dev/mapper/$luks_name
-            enroll_luks_credentials "$mount_point" "$device_real" "$uuid" "$tpm2" "$tpm2_pcrs" "$tpm2_recovery" "$key_file"
-            if [[ $luks_ephemeral_key == true ]]; then
-                systemd-cryptenroll --wipe-slot=password "$device_real"
-                remove_temporary_luks_key "$key_file"
-            fi
-        fi
-
-        format_ext_vol_filesystem "$filesystem" "$label" "$block_device"
-        udevadm settle
-        wait_for_device "/dev/disk/by-label/$label"
-        ext_vol_sources_resolved[index]=/dev/disk/by-label/$label
+vol_prepare_existing() {
+    local index
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_existing[$index]:-false} == true ]] || continue
+        if [[ -n ${vol_luks[$index]:-} ]]; then vol_activate_luks "$index"; else vol_source_resolved[index]=${vol_device[$index]}; fi
+        vol_verify_subvolume "$index"
     done
 }
 
-create_subvolumes() {
-    mkdir -p "$work_root/top"
-    mount -o subvolid=5 /dev/disk/by-label/root "$work_root/top"
-    cleanup_mounts+=("$work_root/top")
+vol_prepare_filesystems() {
+    local index device label filesystem_uuid
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_existing[$index]:-false} == false && -z ${vol_backing_index[$index]:-} ]] || continue
+        [[ -n ${vol_partition_index[$index]:-} ]] || vol_clear_parent "$(readlink -f -- "${vol_device[$index]}")"
+        device=${vol_partition_resolved[$index]:-${vol_device[$index]}}
+        [[ -n ${vol_luks[$index]:-} ]] && vol_activate_luks "$index" && device=${vol_source_resolved[$index]}
+        vol_format_filesystem "$index" "$device"
+        label=${vol_fs_label[$index]}
+        udevadm settle
+        if [[ -n $label ]]; then
+            wait_for_device "/dev/disk/by-label/$label"
+            vol_source_resolved[index]=/dev/disk/by-label/$label
+            filesystem_uuid=$(blkid -s UUID -o value "/dev/disk/by-label/$label")
+            [[ -n $filesystem_uuid ]] || die "could not determine filesystem UUID for $label"
+            case "$label" in
+                boot) boot_filesystem_uuid=$filesystem_uuid ;;
+                boot_efi) efi_filesystem_uuid=$filesystem_uuid ;;
+            esac
+        fi
+        vol_label_resolved[index]=$label
+    done
+}
 
-    btrfs subvolume create "$work_root/top/root"
-
-    umount "$work_root/top"
+vol_create_subvolume() {
+    local source=$1 path=$2 staging=$3 old_path migrated=false
+    mkdir -p "$staging"
+    mount -t btrfs -o subvolid=5 "$source" "$staging"
+    cleanup_mounts+=("$staging")
+    path=$staging/$path
+    while [[ $path != "$staging" ]]; do
+        [[ ! -L $path ]] || die "volume subvolume is a symlink: ${path#"$staging/"}"
+        if [[ -e $path ]]; then [[ -d $path ]] || die "volume subvolume is not a directory: ${path#"$staging/"}"; fi
+        path=${path%/*}; [[ -n $path ]] || path=$staging
+    done
+    path=$staging/${2}
+    if ! btrfs subvolume show "$path" >/dev/null 2>&1; then
+        if [[ -e $path ]]; then
+            old_path="${path}.bootc-installer-old"
+            [[ ! -e $old_path && ! -L $old_path ]] || die "temporary migration path already exists: $old_path"
+            mv "$path" "$old_path"
+            mkdir -p -- "$(dirname -- "$path")"
+            migrated=true
+        else
+            mkdir -p -- "$(dirname -- "$path")"
+        fi
+        btrfs subvolume create "$path"
+        if [[ $migrated == true ]]; then
+            chown root:root "$path"; chmod 0755 "$path"
+            cp -a --reflink=auto "$old_path/." "$path/"
+            rm -rf -- "$old_path"
+        fi
+    fi
+    umount "$staging"
     unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
 }
 
-mount_install_target() {
-    log "Mounting installation target at $install_root"
-    mkdir -p "$install_root"
-    mount -o "subvol=root,$root_mount_options" /dev/disk/by-label/root "$install_root"
-    cleanup_mounts+=("$install_root")
-
-    mkdir -p "$install_root/boot/efi"
-    mount /dev/disk/by-label/boot "$install_root/boot"
-    cleanup_mounts+=("$install_root/boot")
-    mkdir -p "$install_root/boot/efi"
-    mount /dev/disk/by-label/boot_efi "$install_root/boot/efi"
-    cleanup_mounts+=("$install_root/boot/efi")
+vol_prepare_subvolumes() {
+    local index source
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_subvol_create[$index]:-false} == true ]] || continue
+        source=${vol_source_resolved[$index]:-}
+        [[ -n $source ]] || die "volume source is unavailable for ${vol_mountpoint[$index]}"
+        vol_create_subvolume "$source" "${vol_subvol[$index]}" "$work_root/vol-$index-top"
+    done
 }
 
-prepare_storage() {
-    prepare_existing_ext_volumes
-    prepare_partitions
-    format_filesystems
-    create_subvolumes
-    prepare_ext_vol_filesystems
-    mount_install_target
+vol_mount_options() {
+    local output=$1 index=$2 mount_options=${vol_opts[$2]:-defaults}
+    [[ -z ${vol_subvol[$index]:-} || $mount_options == subvol=* || $mount_options == *,subvol=* ]] ||
+        mount_options="$mount_options,subvol=${vol_subvol[$index]}"
+    printf -v "$output" '%s' "$mount_options"
+}
+
+vol_mount_phase() {
+    local phase=$1 index options target source point depth position candidate candidate_depth
+    local -a order=()
+    for index in "${!vol_role[@]}"; do
+        [[ ${vol_install_phase[$index]} == "$phase" ]] || continue
+        point=${vol_mountpoint[$index]}; depth=${point//[^\/]}; [[ $point == / ]] && depth=
+        position=0
+        for candidate in "${order[@]}"; do
+            candidate_depth=${vol_mountpoint[$candidate]//[^\/]}; [[ ${vol_mountpoint[$candidate]} == / ]] && candidate_depth=
+            ((${#candidate_depth} <= ${#depth})) || break
+            ((position++))
+        done
+        order=("${order[@]:0:position}" "$index" "${order[@]:position}")
+    done
+    while ((${#order[@]})); do
+        index=${order[0]}; order=("${order[@]:1}")
+        source=${vol_source_resolved[$index]}; target=$install_root${vol_mountpoint[$index]}; vol_mount_options options "$index"
+        mkdir -p "$target"
+        mount -t "${vol_fs[$index]}" -o "$options" "$source" "$target"
+        cleanup_mounts+=("$target")
+    done
+}
+
+vol_prepare_storage() {
+    vol_prepare_existing
+    vol_prepare_partitions
+    vol_prepare_filesystems
+    vol_prepare_subvolumes
+    vol_mount_phase predeploy
 }
