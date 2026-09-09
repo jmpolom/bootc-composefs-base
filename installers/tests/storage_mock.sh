@@ -22,6 +22,23 @@ declare -A vol_boot=([action]=create [parent_disk]=$target_disk [partition_numbe
 declare -A vol_esp=([action]=create [parent_disk]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
 declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=postdeploy)
 record_names_valid
+
+minimum_size_root=$(mktemp -d)
+minimum_size_target=$minimum_size_root/target
+minimum_size_other=$minimum_size_root/other
+touch "$minimum_size_target" "$minimum_size_other"
+declare -A vol_sized=([action]=create [parent_disk]=$minimum_size_target [partition_number]=4 [partition_size]=1024)
+declare -A vol_other=([action]=create [parent_disk]=$minimum_size_other [partition_number]=5 [partition_size]=4096)
+declare -A vol_direct=([action]=create [device]=/dev/data)
+declare -A vol_retained=([action]=retain [device]=/dev/retained)
+declare -A vol_relation=([action]=relation [backing]=vol_sized)
+vol_list=(vol_sized vol_other vol_direct vol_retained vol_relation)
+minimum_size=$(target_disk_minimum_size "$(readlink -f -- "$minimum_size_target")" $((2048 * 1024 * 1024)))
+assert_eq "$((3072 * 1024 * 1024))" "$minimum_size" \
+    'target minimum size ignores direct, retained, relation, and other-disk records'
+rm -rf -- "$minimum_size_root"
+vol_list=(vol_root vol_boot vol_esp vol_data)
+
 validate_volume_record vol_root
 assert_eq create "${vol_root[action]}" 'named root record'
 assert_eq /boot "${vol_boot[mountpoint]}" 'named boot record'
@@ -219,6 +236,26 @@ vol_esp[_source]=/dev/esp
 vol_mount_phase predeploy
 assert_eq "$install_root/ $install_root/boot $install_root/boot/efi " "$(tr '\n' ' ' <"$mount_log")" 'mount depth order'
 rm -f -- "$mount_log"; rm -rf -- "$install_root"
+
+# A relation without a subvolume is valid when it mounts the backing filesystem.
+# Keep this lifecycle check under set -u so optional relation fields stay guarded.
+install_root=$(mktemp -d)
+state_root=$(mktemp -d)
+state_target=$state_root/relation
+mkdir -p "$state_target"
+work_root=$(mktemp -d)
+declare -A vol_state_root=([action]=create [fs]=btrfs [subvol]=root [mountpoint]=/ [phase]=predeploy)
+declare -A vol_state_relation=([action]=relation [backing]=vol_state_root [fs]=btrfs
+    [mountpoint]=/relation [phase]=postdeploy [_source]=/dev/state)
+cleanup_mounts=()
+vol_list=(vol_state_root vol_state_relation)
+vol_mount_filesystem() { :; }
+cp() { :; }
+umount() { :; }
+vol_migrate_mounts "$state_root" "$state_root/var"
+assert_eq "$state_target" "${cleanup_mounts[0]}" 'relation without subvolume migrated'
+cleanup_mounts=()
+rm -rf -- "$install_root" "$state_root" "$work_root"
 
 # Backend callbacks produce distinct /var kargs while common handling remains shared.
 mock_append_external_var_karg() { bootc_args+=("mock-var=$1:$2:$3"); }

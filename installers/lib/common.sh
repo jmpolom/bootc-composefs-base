@@ -295,6 +295,20 @@ append_volume_luks_kargs() {
     )
 }
 
+target_disk_minimum_size() {
+    local target_real=$1 minimum_size=$2 record partition_size parent_real
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[action]} == create && -n ${volume[parent_disk]:-} &&
+            -n ${volume[partition_number]:-} ]] || continue
+        parent_real=$(readlink -f -- "${volume[parent_disk]}")
+        [[ $parent_real == "$target_real" ]] || continue
+        partition_size=${volume[partition_size]:-}
+        [[ $partition_size =~ ^[0-9]+$ ]] || continue
+        minimum_size=$((minimum_size + partition_size * 1024 * 1024))
+    done
+    printf '%s\n' "$minimum_size"
+}
 
 validate_common_config() {
     [[ $destructive_confirmed == true ]] || die "-y is required to authorize erasing the configured disks"
@@ -326,7 +340,7 @@ validate_common_config() {
         touch useradd usermod wipefs
     validate_vol_config
 
-    local need_xfs=false record disk_size minimum_size partition_size parent_real
+    local need_xfs=false record disk_size minimum_size
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create && ${volume[fs]} == xfs ]] && need_xfs=true
@@ -334,16 +348,7 @@ validate_common_config() {
     [[ $need_xfs == true ]] && require_commands mkfs.xfs
 
     disk_size=$(lsblk -bdno SIZE "$target_disk_real")
-    minimum_size=$((2048 * 1024 * 1024))
-    for record in "${vol_list[@]}"; do
-        local -n volume=$record
-        partition_size=${volume[partition_size]}
-        parent_real=
-        [[ -n ${volume[parent_disk]:-} ]] && parent_real=$(readlink -f -- "${volume[parent_disk]}")
-        [[ ${volume[action]} == create && $parent_real == "$target_disk_real" &&
-            $partition_size =~ ^[0-9]+$ ]] &&
-            minimum_size=$((minimum_size + partition_size * 1024 * 1024))
-    done
+    minimum_size=$(target_disk_minimum_size "$target_disk_real" $((2048 * 1024 * 1024)))
     ((disk_size >= minimum_size)) ||
         die "target disk is too small for the configured layout"
 

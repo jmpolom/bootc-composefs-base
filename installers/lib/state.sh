@@ -108,7 +108,7 @@ vol_migrate_mounts() {
         if [[ ${volume[action]} == relation && ${volume[backing]:-} == vol_root ]]; then
             local -n root=vol_root
             local relation_path=$install_root
-            if [[ ${volume[subvol]} == "${root[subvol]:-}"/* ]]; then
+            if [[ ${volume[subvol]:-} == "${root[subvol]:-}"/* ]]; then
                 relation_path=$install_root/${volume[subvol]#"${root[subvol]}"/}
             fi
             [[ $target_path == "$relation_path" ]] && continue
