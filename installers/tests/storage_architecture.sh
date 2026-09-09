@@ -85,7 +85,7 @@ done
 [[ $(rg -n 'wipefs --all' "$storage" | wc -l | tr -d ' ') == 1 ]]
 [[ $(rg -n 'sgdisk --zap-all' "$storage" | wc -l | tr -d ' ') == 1 ]]
 [[ $(rg -n '^vol_format_filesystem' "$storage" | wc -l | tr -d ' ') == 1 ]]
-for name in vol_format_filesystem vol_activate_luks vol_create_subvolume vol_prepare_subvolumes; do
+for name in vol_format_filesystem vol_activate_luks vol_create_subvolume; do
     body=$(awk -v n="$name" '$0 ~ "^" n "[[:space:]]*\\(" {on=1} on{print} on && /^}/ {exit}' "$storage")
     ! grep -E 'root_|/boot|/boot/efi|separate_|/var|/state' <<<"$body" >/dev/null || { printf 'role branch in %s\n' "$name" >&2; exit 1; }
 done

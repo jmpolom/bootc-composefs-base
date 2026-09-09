@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034,SC2154
+# shellcheck disable=SC2030,SC2031,SC2034,SC2154
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$root/installers/lib/common.sh"
@@ -201,7 +201,30 @@ declare -A vol_crypto=([action]=create [device]=/dev/crypto [mountpoint]=/crypto
     [fs_label]=crypto [encryption]=luks-create [luks_name]=crypto_name [luks_label]=crypto_luks
     [credential]=ephemeral [tpm2]=true [recovery]=true [subvol_action]=none)
 vol_list=(vol_crypto)
-recovery_key_output_file=$(mktemp)
+recovery_output_root=$(mktemp -d)
+recovery_key_output_file=$recovery_output_root/nested/recovery.keys
+initialize_recovery_key_output
+[[ -f $recovery_key_output_file && ! -L $recovery_key_output_file ]] || die 'recovery output was not initialized'
+recovery_symlink=$recovery_output_root/recovery-link
+ln -s "$recovery_key_output_file" "$recovery_symlink"
+if (recovery_key_output_file=$recovery_symlink; initialize_recovery_key_output); then
+    die 'recovery output symlink was accepted'
+fi
+recovery_mode=$(stat -c '%a' "$recovery_key_output_file" 2>/dev/null || stat -f '%Lp' "$recovery_key_output_file")
+assert_eq 600 "$recovery_mode" 'recovery output permissions'
+recovery_uuid=11111111-2222-3333-4444-555555555555
+capture_recovery_key captured_recovery /dev/recovery
+validate_recovery_key captured_recovery || die 'valid recovery key was rejected'
+test_recovery_key captured_recovery /dev/recovery || die 'valid recovery key failed unlock test'
+write_recovery_key_record recovery_uuid captured_recovery "$recovery_key_output_file" ||
+    die 'recovery key record write failed'
+if (captured_recovery=invalid; validate_recovery_key captured_recovery); then
+    die 'invalid recovery key was accepted'
+fi
+if (captured_recovery=invalid; write_recovery_key_record recovery_uuid captured_recovery "$recovery_key_output_file"); then
+    die 'invalid recovery key record was written'
+fi
+assert_eq 1 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'recovery record remains atomic after rejection'
 vol_crypto[_partition_device]=/dev/crypto
 vol_activate_luks vol_crypto
 grep -q 'cryptenroll --recovery-key' "$crypto_log" || die 'recovery enrollment missing'
@@ -210,7 +233,8 @@ first_recovery=$(grep -n -- '--recovery-key' "$crypto_log" | head -n1 | cut -d: 
 first_tpm=$(grep -n -- '--tpm2-device=auto' "$crypto_log" | head -n1 | cut -d: -f1)
 first_wipe=$(grep -n -- '--wipe-slot=password' "$crypto_log" | head -n1 | cut -d: -f1)
 ((first_recovery < first_tpm && first_tpm < first_wipe)) || die 'TPM/recovery/cleanup order changed'
-rm -f -- "$crypto_log" "$recovery_key_output_file"
+assert_eq 2 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'one recovery record per enrollment'
+rm -f -- "$crypto_log"; rm -rf -- "$recovery_output_root"
 vol_data[fs]=xfs
 
 dispatch_log=$(mktemp)

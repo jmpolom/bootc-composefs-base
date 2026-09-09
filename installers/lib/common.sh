@@ -216,7 +216,7 @@ validate_var_tmp() {
 validate_recovery_output_target() {
     local path=$1
     [[ $path == /* ]] || die "recovery_key_output_file must be absolute"
-    [[ $(realpath -m -- "$path") == "$path" ]] ||
+    is_normalized_absolute_path "$path" ||
         die "recovery_key_output_file is not normalized: $path"
     [[ ! -L $path ]] || die "recovery_key_output_file must not be a symlink"
 
@@ -242,6 +242,64 @@ validate_recovery_output_aliases() {
     fi
     if [[ -n $password_file ]] && paths_alias "$output" "$password_file"; then
         die "recovery_key_output_file must not alias a volume credential file: $output"
+    fi
+}
+
+initialize_recovery_key_output() {
+    [[ -n $recovery_key_output_file ]] || return 0
+    validate_recovery_output_target "$recovery_key_output_file"
+
+    local output_dir=${recovery_key_output_file%/*} temporary_output
+    [[ -n $output_dir ]] || output_dir=/
+    mkdir -p -- "$output_dir"
+    validate_recovery_output_target "$recovery_key_output_file"
+    temporary_output=$(mktemp "$output_dir/.recovery-keys.XXXXXX") || return 1
+    if ! chmod 0600 "$temporary_output" || ! mv -f -- "$temporary_output" "$recovery_key_output_file"; then
+        rm -f -- "$temporary_output"
+        return 1
+    fi
+}
+
+capture_recovery_key() {
+    local output_name=$1 device=$2 captured_output status
+    shift 2
+    if captured_output=$(SYSTEMD_COLORS=0 systemd-cryptenroll "$@" --recovery-key "$device"); then
+        status=0
+    else
+        status=$?
+    fi
+    printf -v "$output_name" '%s' "$captured_output"
+    return "$status"
+}
+
+test_recovery_key() {
+    local key_name=$1 device=$2 status
+    if printf '%s' "${!key_name-}" | cryptsetup open --test-passphrase --key-file=- "$device"; then
+        status=0
+    else
+        status=$?
+    fi
+    return "$status"
+}
+
+validate_recovery_key() {
+    [[ ${!1-} =~ ^[bcdefghijklnrtuv]{8}(-[bcdefghijklnrtuv]{8}){7}$ ]]
+}
+
+write_recovery_key_record() {
+    local uuid_name=$1 key_name=$2 output_file=$3
+    local uuid=${!uuid_name-} key=${!key_name-} output_dir temporary_output
+    [[ $uuid =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
+    validate_recovery_key "$key_name" || return 1
+    [[ -f $output_file && ! -L $output_file ]] || return 1
+    output_dir=${output_file%/*}
+    [[ -n $output_dir ]] || output_dir=/
+    temporary_output=$(mktemp "$output_dir/.recovery-keys.XXXXXX") || return 1
+    if ! chmod 0600 "$temporary_output" || ! cat -- "$output_file" >"$temporary_output" ||
+        ! printf '%s %s\n' "$uuid" "$key" >>"$temporary_output" ||
+        ! mv -f -- "$temporary_output" "$output_file"; then
+        rm -f -- "$temporary_output"
+        return 1
     fi
 }
 

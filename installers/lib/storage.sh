@@ -402,15 +402,13 @@ enroll_luks_credentials() {
     [[ ${volume[tpm2]:-false} == true ]] || return 0
     [[ -n $key ]] && unlock+=("--unlock-key-file=$key")
     if [[ ${volume[recovery]:-false} == true ]]; then
-        local output parsed_key
-        output=$(SYSTEMD_COLORS=0 systemd-cryptenroll --recovery-key "$device" "${unlock[@]}") || return $?
+        local output parsed_key recovery_uuid=${volume[_luks_uuid]}
+        capture_recovery_key output "$device" "${unlock[@]}" || return $?
         parsed_key=$(grep -Eo '[bcdefghijklnrtuv]{8}(-[bcdefghijklnrtuv]{8}){7}' <<< "$output" | tail -n1)
-        [[ -n $parsed_key ]] || die 'systemd-cryptenroll returned an invalid recovery key'
-        printf '%s' "$parsed_key" |
-            cryptsetup open --test-passphrase --key-file=- "$device" ||
+        validate_recovery_key parsed_key || die 'systemd-cryptenroll returned an invalid recovery key'
+        test_recovery_key parsed_key "$device" ||
             die "generated recovery key did not unlock $record"
-        printf '%s %s\n' "${volume[_luks_uuid]}" "$parsed_key" >> \
-            "$recovery_key_output_file"
+        write_recovery_key_record recovery_uuid parsed_key "$recovery_key_output_file"
     fi
     local -a enroll=(--tpm2-device=auto)
     [[ -n ${volume[tpm2_pcrs]:-} ]] &&
