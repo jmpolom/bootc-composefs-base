@@ -357,9 +357,9 @@ target_disk_minimum_size() {
     local target_real=$1 minimum_size=$2 record partition_size parent_real
     for record in "${vol_list[@]}"; do
         local -n volume=$record
-        [[ ${volume[action]} == create && -n ${volume[parent_disk]:-} &&
+        [[ ${volume[action]} == create && -n ${volume[device]:-} &&
             -n ${volume[partition_number]:-} ]] || continue
-        parent_real=$(readlink -f -- "${volume[parent_disk]}")
+        parent_real=$(readlink -f -- "${volume[device]}")
         [[ $parent_real == "$target_real" ]] || continue
         partition_size=${volume[partition_size]:-}
         [[ $partition_size =~ ^[0-9]+$ ]] || continue
@@ -428,7 +428,7 @@ validate_common_config() {
             "$installer_config_file"
     fi
     recovery_enrollment_requested=$recovery_requested
-    if [[ $tpm_enrollment_requested == true ]]; then
+    if [[ $tpm_enrollment_requested == true || $recovery_requested == true ]]; then
         require_commands systemd-cryptenroll
     fi
 }

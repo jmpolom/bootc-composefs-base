@@ -17,11 +17,12 @@ reject_short_list() {
 target_disk=$(mktemp)
 target_disk_real=$(command readlink -f -- "$target_disk")
 physical_var_path=/state/os/default/var
-vol_list=(vol_root vol_boot vol_esp vol_data)
-declare -A vol_root=([action]=create [parent_disk]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create [phase]=predeploy)
-declare -A vol_boot=([action]=create [parent_disk]=$target_disk [partition_number]=2 [partition_size]=1024 [partition_type]=guid [partition_label]=boot [mountpoint]=/boot [fs]=ext4 [fs_label]=boot [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
-declare -A vol_esp=([action]=create [parent_disk]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
+vol_list=(vol_root vol_boot vol_esp vol_data vol_partition_relation)
+declare -A vol_root=([action]=create [device]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create [phase]=predeploy)
+declare -A vol_boot=([action]=create [device]=$target_disk [partition_number]=2 [partition_size]=1024 [partition_type]=guid [partition_label]=boot [mountpoint]=/boot [fs]=ext4 [fs_label]=boot [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
+declare -A vol_esp=([action]=create [device]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
 declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=postdeploy)
+declare -A vol_partition_relation=([action]=relation)
 record_names_valid
 
 # Partition creation keeps the required root-first vol_list order while placing
@@ -42,14 +43,15 @@ lsblk() { printf '%s\n' "$(readlink -f -- "$target_disk")"; }
 vol_prepare_partitions
 assert_eq "--new=2:0:+1024MiB --typecode=2:guid --change-name=2:boot --new=1:0:+600MiB --typecode=1:guid --change-name=1:boot_efi --new=3:0:0 --typecode=3:guid --change-name=3:root $target_disk_real" \
     "${partition_args[*]}" 'sgdisk fixed-size partitions precede remainder'
+assert_eq /dev/disk/by-partlabel/root "${vol_root[_partition_device]}" 'generated partition device'
 rm -f -- "$target_disk"
 
 minimum_size_root=$(mktemp -d)
 minimum_size_target=$minimum_size_root/target
 minimum_size_other=$minimum_size_root/other
 touch "$minimum_size_target" "$minimum_size_other"
-declare -A vol_sized=([action]=create [parent_disk]=$minimum_size_target [partition_number]=4 [partition_size]=1024)
-declare -A vol_other=([action]=create [parent_disk]=$minimum_size_other [partition_number]=5 [partition_size]=4096)
+declare -A vol_sized=([action]=create [device]=$minimum_size_target [partition_number]=4 [partition_size]=1024)
+declare -A vol_other=([action]=create [device]=$minimum_size_other [partition_number]=5 [partition_size]=4096)
 declare -A vol_direct=([action]=create [device]=/dev/data)
 declare -A vol_retained=([action]=retain [device]=/dev/retained)
 declare -A vol_relation=([action]=relation [backing]=vol_sized)
@@ -121,6 +123,30 @@ if (unset 'vol_data[device]'; validate_volume_record vol_data); then
     die 'missing create device accepted'
 fi
 vol_data[device]=/dev/data
+if (unset 'vol_root[device]'; validate_volume_record vol_root); then
+    die 'missing partitioned create device accepted'
+fi
+vol_root[device]=$target_disk
+
+# Partition fields are an all-or-none create tuple; retain and relation records never use them.
+declare -A vol_partitioned=([action]=create [device]=/dev/partitioned [partition_number]=4
+    [partition_size]=1024 [partition_type]=guid [partition_label]=partitioned [mountpoint]=/partitioned
+    [fs]=ext4 [fs_label]=partitioned [encryption]=none [credential]=none [subvol_action]=none)
+validate_volume_record vol_partitioned
+if (unset 'vol_partitioned[partition_label]'; validate_volume_record vol_partitioned); then
+    die 'partial partition tuple accepted'
+fi
+if (unset 'vol_partitioned[partition_number]'; validate_volume_record vol_partitioned); then
+    die 'stray partition fields on direct create accepted'
+fi
+declare -A vol_retain_schema=([action]=retain [device]=/dev/retained-schema [mountpoint]=/retained-schema
+    [fs]=xfs [encryption]=none [credential]=none [subvol_action]=none [partition_size]=1024)
+if (validate_volume_record vol_retain_schema); then die 'partition field on retain accepted'; fi
+declare -A vol_relation_schema=([action]=relation [backing]=vol_root [mountpoint]=/relation-schema
+    [fs]=btrfs [encryption]=none [credential]=none [subvol_action]=none [device]=/dev/invalid)
+if (validate_volume_record vol_relation_schema); then die 'device on relation accepted'; fi
+unset 'vol_relation_schema[device]'; vol_relation_schema[partition_number]=1
+if (validate_volume_record vol_relation_schema); then die 'partition field on relation accepted'; fi
 
 # All public mode enums and valid combinations are accepted; invalid combinations reject.
 vol_data[action]=retain
@@ -150,9 +176,12 @@ vol_data[fs]=btrfs
 vol_data[subvol]=data
 vol_data[subvol_action]=create
 validate_volume_record vol_data
-if (vol_data[recovery]=true; vol_data[tpm2]=false; validate_volume_record vol_data); then
-    die 'recovery without TPM accepted'
+vol_data[tpm2]=false
+validate_volume_record vol_data
+if (vol_data[credential]=none; vol_data[encryption]=none; validate_volume_record vol_data); then
+    die 'plaintext recovery accepted'
 fi
+vol_data[encryption]=luks-create
 rm -f -- "$credential_file"
 
 # Explicit relation backing and shortcut conflicts are validated before lifecycle work.
@@ -186,7 +215,7 @@ assert_eq environment-secret "$(<"$materialized")" 'environment credential mater
 rm -rf -- "$work_root" "$materialized"
 work_root=$(mktemp -d)
 
-# Encrypted activation, recovery-before-TPM ordering, and ephemeral password cleanup.
+# Encrypted activation supports recovery-only and recovery-before-TPM enrollment.
 crypto_log=$(mktemp)
 cryptsetup() {
     printf 'cryptsetup %s\n' "$*" >>"$crypto_log"
@@ -200,6 +229,7 @@ systemd-cryptenroll() {
     if [[ $* == *--recovery-key* ]]; then
         printf 'bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv-bcdefghi-jklnrtuv\n'
     fi
+    [[ ${mock_tpm_failure:-false} != true || $* != *--tpm2-device=auto* ]] || return 1
     return 0
 }
 blkid() {
@@ -247,14 +277,27 @@ if (captured_recovery=invalid; write_recovery_key_record recovery_uuid captured_
 fi
 assert_eq 1 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'recovery record remains atomic after rejection'
 vol_crypto[_partition_device]=/dev/crypto
+vol_crypto[tpm2]=false
 vol_activate_luks vol_crypto
 grep -q 'cryptenroll --recovery-key' "$crypto_log" || die 'recovery enrollment missing'
+if grep -q -- '--tpm2-device=auto' "$crypto_log"; then die 'recovery-only enrollment used TPM'; fi
 grep -q 'cryptenroll --wipe-slot=password' "$crypto_log" || die 'ephemeral cleanup missing'
+assert_eq 2 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'one recovery record for recovery-only enrollment'
+: >"$crypto_log"
+vol_crypto[tpm2]=true
+vol_activate_luks vol_crypto
 first_recovery=$(grep -n -- '--recovery-key' "$crypto_log" | head -n1 | cut -d: -f1)
 first_tpm=$(grep -n -- '--tpm2-device=auto' "$crypto_log" | head -n1 | cut -d: -f1)
 first_wipe=$(grep -n -- '--wipe-slot=password' "$crypto_log" | head -n1 | cut -d: -f1)
 ((first_recovery < first_tpm && first_tpm < first_wipe)) || die 'TPM/recovery/cleanup order changed'
-assert_eq 2 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'one recovery record per enrollment'
+assert_eq 3 "$(wc -l <"$recovery_key_output_file" | tr -d ' ')" 'one recovery record per enrollment'
+: >"$crypto_log"
+mock_tpm_failure=true
+if (vol_activate_luks vol_crypto); then die 'failed TPM enrollment accepted'; fi
+if grep -q -- '--wipe-slot=password' "$crypto_log"; then
+    die 'ephemeral credential removed after failed TPM enrollment'
+fi
+mock_tpm_failure=false
 rm -f -- "$crypto_log"; rm -rf -- "$recovery_output_root"
 vol_data[fs]=xfs
 

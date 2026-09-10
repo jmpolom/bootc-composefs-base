@@ -21,9 +21,11 @@ must resolve to a global Bash associative array. Additional records follow.
 Each record uses these fields:
 
 * `action`: `create`, `retain`, or `relation`.
-* `device`, `parent_disk`, `partition_number`, `partition_size`, `partition_type`,
-  and `partition_label` describe media. Partition numbers are explicit and do
-  not depend on list order.
+* `device` identifies a partitioned create's whole disk, a direct create's
+  whole device, or a retained device. `partition_number`, `partition_size`,
+  `partition_type`, and `partition_label` form an all-or-none tuple for a
+  partitioned create; relation records specify neither device nor partition
+  fields. Partition numbers are explicit and do not depend on list order.
 * `mountpoint`, `fs`, `fs_label`, and `mount_options` describe the filesystem.
   A created filesystem requires an explicit `fs_label`; retained filesystems
   may use any filesystem supported by the kernel.
@@ -32,19 +34,19 @@ Each record uses these fields:
 * `credential` is `none`, `prompt`, `file`, `ephemeral`, or `env`. A file
   credential requires `credential_file`; an environment credential reads and
   erases `lvc_<luks_name>`. Ephemeral credentials apply only to new LUKS
-  records and are removed after TPM and recovery access have been enrolled.
+  records and are removed after recovery and any requested TPM access have been enrolled.
 * `subvol_action` is `none`, `select`, or `create`, with `subvol` naming a
   normalized Btrfs subvolume. `none` mounts the filesystem root, `select`
   requires an existing subvolume, and `create` creates it if absent.
 * `tpm2`, `tpm2_pcrs`, and `recovery` configure per-record enrollment. Recovery
-  requires TPM2 and `recovery_key_output_file`.
+  requires encryption and `recovery_key_output_file`, but not TPM2.
 
 The root record is ordinary data, for example:
 
 ```bash
 vol_list=(vol_root vol_boot vol_esp vol_data)
 declare -A vol_root=(
-  [action]=create [parent_disk]="$target_disk" [partition_number]=3
+  [action]=create [device]="$target_disk" [partition_number]=3
   [partition_size]=remainder [partition_type]=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
   [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root
   [mount_options]=compress=zstd,noatime [encryption]=none [credential]=none
@@ -147,13 +149,13 @@ arrangement. The root filesystem always contains the configured root subvolume; 
 ## TPM2 and recovery enrollment
 
 TPM2 policy is configured per LUKS volume. Set `tpm2=true` and, optionally, `tpm2_pcrs` on a
-record; set `recovery=true` to enroll a recovery key. Recovery enrollment is accepted only for a
-TPM-enabled encrypted volume. When requested, `recovery_key_output_file` is required, replaced
+record; set `recovery=true` to enroll a recovery key. Recovery enrollment is accepted for any
+encrypted volume. When requested, `recovery_key_output_file` is required, replaced
 with mode `0600`, and written as one `LUKS_UUID RECOVERY_KEY` record per volume. Generated keys are
 tested before being recorded and are not written to normal logs.
 
-`credential=ephemeral` is valid only for a newly created LUKS volume with TPM and recovery enabled.
-The temporary password slot is removed only after both recovery and TPM enrollment succeed.
+`credential=ephemeral` is valid only for a newly created LUKS volume with recovery enabled.
+The temporary password slot is removed only after recovery and any requested TPM enrollment succeed.
 Interactive and supplied-password setups retain their password slots. `credential=env` reads and
 erases `lvc_<luks_name>` during activation; do not use `-t` when credentials are present because
 xtrace can expose sensitive values.

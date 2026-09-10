@@ -161,7 +161,7 @@ validate_volume_format() {
         relation)
             require_volume_fields "$record" backing fs
             [[ ${volume[encryption]} == none ]] || die "$record relation encryption is invalid"
-            [[ -z ${volume[device]:-} && ${volume[fs]} == btrfs ]] || die "$record relation fields are invalid"
+            [[ ${volume[fs]} == btrfs ]] || die "$record relation fields are invalid"
             ;;
         create)
             local limit
@@ -212,7 +212,7 @@ validate_volume_crypto() {
     is_boolean "$tpm" || die "$record tpm2 is invalid"
     is_boolean "$recovery" || die "$record recovery is invalid"
     [[ $tpm == true && $encryption == none ]] && die "$record tpm2 requires encryption"
-    [[ $recovery == true && $tpm != true ]] && die "$record recovery requires tpm2"
+    [[ $recovery == true && $encryption == none ]] && die "$record recovery requires encryption"
     return 0
 }
 
@@ -233,18 +233,19 @@ validate_volume_record() {
     validate_volume_crypto "$record"
     local number=${volume[partition_number]:-}
 
-    if [[ ${volume[action]} == create && -n $number ]]; then
-        require_volume_fields "$record" partition_size partition_type partition_label parent_disk
+    case ${volume[action]}:${volume[device]:+set}:${number:+set}:${volume[partition_size]:+set}${volume[partition_type]:+set}${volume[partition_label]:+set} in
+    create:set:set:setsetset)
         [[ $number =~ ^[1-9][0-9]*$ ]] || die "$record partition_number is invalid"
         [[ ${volume[partition_size]} == remainder || ${volume[partition_size]} =~ ^[1-9][0-9]*$ ]] ||
             die "$record partition_size is invalid"
-    elif [[ ${volume[action]} == create ]]; then
-        require_volume_fields "$record" device
-        [[ -z ${volume[parent_disk]:-} ]] || die "$record cannot combine direct device and parent_disk"
-    else
-        [[ -z $number && -z ${volume[parent_disk]:-} ]] ||
-            die "$record partition fields are only valid for created volumes"
-    fi
+        ;;
+    create:set::) ;;
+    create:*:*) die "$record requires device and a complete partition tuple" ;;
+    retain:set::) ;;
+    retain:*) die "$record retain fields are invalid" ;;
+    relation:::) ;;
+    relation:*) die "$record relation must not specify device or partition fields" ;;
+    esac
 }
 
 validate_relation_graph() {
@@ -274,10 +275,10 @@ validate_volume_devices() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create ]] || continue
-        parent=${volume[parent_disk]:-${volume[device]}}
+        parent=${volume[device]}
         real=$(readlink -f -- "$parent")
         create_parents[$real]=1
-        if [[ -n ${volume[parent_disk]:-} ]]; then
+        if [[ -n ${volume[partition_number]:-} ]]; then
             partition_parents[$real]=1
         else
             direct_parents[$real]=1
@@ -324,7 +325,7 @@ validate_vol_config() {
     record_names_valid
     for record in vol_root vol_boot vol_esp; do
         local -n core=$record
-        require_volume_fields "$record" parent_disk partition_number partition_size partition_type partition_label
+        require_volume_fields "$record" device partition_number partition_size partition_type partition_label
         case "$record:${core[mountpoint]}:${core[fs]}" in
             vol_root:/:btrfs|vol_boot:/boot:ext4|vol_esp:/boot/efi:vfat)
                 [[ ${core[action]} == create ]] || die "$record has an invalid core layout" ;;
@@ -351,12 +352,12 @@ validate_vol_config() {
         remember_volume_key paths "${volume[mountpoint]}" \
             "duplicate mountpoint: ${volume[mountpoint]}" "$record"
         if [[ -n ${volume[partition_number]:-} ]]; then
-            key="${volume[parent_disk]}:${volume[partition_number]}"
+            key="$(readlink -f -- "${volume[device]}"):${volume[partition_number]}"
             remember_volume_key partitions "$key" \
-                "duplicate partition_number on parent ${volume[parent_disk]}" "$record"
+                "duplicate partition_number on device ${volume[device]}" "$record"
         fi
         if [[ ${volume[action]} == create ]]; then
-            key=$(readlink -f -- "${volume[parent_disk]:-${volume[device]}}")
+            key=$(readlink -f -- "${volume[device]}")
             remember_volume_key labels "${volume[fs_label]}" \
                 "duplicate filesystem label: ${volume[fs_label]}" "$record"
             local label_path="/dev/disk/by-label/${volume[fs_label]}"
@@ -398,14 +399,14 @@ vol_prepare_partitions() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create && -n ${volume[partition_number]:-} ]] || continue
-        parent=$(readlink -f -- "${volume[parent_disk]}"); parents[$parent]=1; done
+        parent=$(readlink -f -- "${volume[device]}"); parents[$parent]=1; done
 
     for parent in "${!parents[@]}"; do
         vol_clear_parent "$parent"
         args=()
         for record in "${vol_list[@]}"; do
             local -n volume=$record
-            [[ $(readlink -f -- "${volume[parent_disk]:-}") == "$parent" &&
+            [[ $(readlink -f -- "${volume[device]:-}") == "$parent" &&
                 -n ${volume[partition_number]:-} && ${volume[partition_size]} != remainder ]] || continue
             size=${volume[partition_size]}
             args+=("--new=${volume[partition_number]}:0:+${size}MiB"
@@ -415,7 +416,7 @@ vol_prepare_partitions() {
 
         for record in "${vol_list[@]}"; do
             local -n volume=$record
-            [[ $(readlink -f -- "${volume[parent_disk]:-}") == "$parent" &&
+            [[ $(readlink -f -- "${volume[device]:-}") == "$parent" &&
                 -n ${volume[partition_number]:-} && ${volume[partition_size]} == remainder ]] || continue
             args+=("--new=${volume[partition_number]}:0:0"
                 "--typecode=${volume[partition_number]}:${volume[partition_type]}"
@@ -431,8 +432,8 @@ vol_prepare_partitions() {
         [[ -n ${volume[partition_number]:-} ]] || continue
         volume[_partition_device]=/dev/disk/by-partlabel/${volume[partition_label]}; wait_for_device "${volume[_partition_device]}"
         resolved=$(readlink -f -- "${volume[_partition_device]}")
-        [[ $(lsblk -nrpo PKNAME "$resolved" | head -n1) == "$(readlink -f -- "${volume[parent_disk]}")" ]] ||
-            die "${volume[_partition_device]} is not on expected parent disk ${volume[parent_disk]}"
+        [[ $(lsblk -nrpo PKNAME "$resolved" | head -n1) == "$(readlink -f -- "${volume[device]}")" ]] ||
+            die "${volume[_partition_device]} is not on expected device ${volume[device]}"
     done
 }
 
@@ -471,7 +472,7 @@ enroll_luks_credentials() {
     local -n volume=$record
     local -a unlock=()
 
-    [[ ${volume[tpm2]:-false} == true ]] || return 0
+    [[ ${volume[recovery]:-false} == true || ${volume[tpm2]:-false} == true ]] || return 0
     [[ -n $key ]] && unlock+=("--unlock-key-file=$key")
     if [[ ${volume[recovery]:-false} == true ]]; then
         local output parsed_key recovery_uuid=${volume[_luks_uuid]}
@@ -480,9 +481,10 @@ enroll_luks_credentials() {
         validate_recovery_key parsed_key || die 'systemd-cryptenroll returned an invalid recovery key'
         test_recovery_key parsed_key "$device" ||
             die "generated recovery key did not unlock $record"
-        write_recovery_key_record recovery_uuid parsed_key "$recovery_key_output_file"
+        write_recovery_key_record recovery_uuid parsed_key "$recovery_key_output_file" || return $?
     fi
 
+    [[ ${volume[tpm2]:-false} == true ]] || return 0
     local -a enroll=(--tpm2-device=auto)
     [[ -n ${volume[tpm2_pcrs]:-} ]] &&
         enroll+=("--tpm2-pcrs=${volume[tpm2_pcrs]}")
@@ -510,7 +512,7 @@ vol_activate_luks() {
     volume[_luks_uuid]=$(cryptsetup luksUUID "$device")
     [[ -n ${volume[_luks_uuid]} ]] || die "could not determine LUKS UUID for $record"
     volume[_source]=/dev/mapper/${volume[luks_name]}
-    enroll_luks_credentials "$record" "$device" "$key"
+    enroll_luks_credentials "$record" "$device" "$key" || return $?
     if [[ ${volume[credential]} == ephemeral ]]; then
         systemd-cryptenroll --wipe-slot=password "$device"
     fi
