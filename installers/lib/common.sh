@@ -334,10 +334,6 @@ backend_callback() {
     "$function_name" "$@"
 }
 
-validate_backend_mount_target() {
-    backend_callback validate_mount_target "$1"
-}
-
 append_external_var_karg() {
     backend_callback append_external_var_karg "$@"
 }
@@ -393,7 +389,7 @@ validate_common_config() {
     [[ -z $mounted_path ]] || die "target disk has a mounted filesystem at $mounted_path"
     active_type=$(lsblk -nrpo TYPE "$target_disk_real" | awk '$1 ~ /^(crypt|lvm|raid)/ { print; exit }')
     [[ -z $active_type ]] || die "target disk has an active mapped descendant of type $active_type"
-    require_commands awk blkid bootc btrfs chmod chown cp cryptsetup find findmnt getent grep \
+    require_commands awk blkid bootc btrfs chmod chown cryptsetup find findmnt getent grep \
         dd install ln lsblk mkfs.btrfs mkfs.ext4 mkfs.vfat mktemp mount mv readlink realpath rm sed sgdisk sort cut sync udevadm umount \
         touch useradd usermod wipefs
     validate_vol_config
@@ -459,7 +455,7 @@ append_common_kargs() {
     local source filesystem options mount_point uuid luks_name
     for record in "${vol_list[@]}"; do
         local -n volume=$record
-        [[ ${volume[phase]:-predeploy} == postdeploy ]] || continue
+        [[ $record != vol_root && $record != vol_boot && $record != vol_esp ]] || continue
         source=${volume[_source]:-}; filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
         if [[ $mount_point == /var ]]; then
@@ -573,8 +569,6 @@ run_installer() {
     persistent_var="$install_root$physical_var_path"
     backend_callback locate_deployment
     backend_callback postprocess
-    vol_prepare_targets "$config_root" "$persistent_var"
-    vol_migrate_mounts "$config_root" "$persistent_var"
     configure_first_user "$config_root" "$persistent_var"
     relabel_target_paths "$config_root"
     finish_installation

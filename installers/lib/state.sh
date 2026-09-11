@@ -1,61 +1,13 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2154
 
-label_new_state_path() {
-    local state_path=$1
-    local runtime_path=$2
-    local parent_path=$3
-    local context
-
-    if command -v matchpathcon >/dev/null 2>&1 && command -v chcon >/dev/null 2>&1; then
-        if context=$(matchpathcon -n "$runtime_path"); then
-            if chcon "$context" "$state_path"; then
-                return
-            fi
-            log "SELinux context application was unavailable for $state_path"
-        else
-            log "SELinux policy lookup was unavailable for $runtime_path"
-        fi
-    fi
-
-    if command -v chcon >/dev/null 2>&1; then
-        chcon --reference="$parent_path" "$state_path" ||
-            log "SELinux context copy was unavailable for $state_path"
-    fi
-}
-
-state_path_for_mount() {
-    local persistent_var=$1
-    local mount_point=$2
-
-    case "$mount_point" in
-        /var) printf '%s\n' "$persistent_var" ;;
-        /var/*) printf '%s/%s\n' "$persistent_var" "${mount_point#/var/}" ;;
-        *) return 1 ;;
-    esac
-}
-
-mount_target_path() {
-    local config_root=$1
-    local persistent_var=$2
-    local mount_point=$3
-    local state_path
-
-    if state_path=$(state_path_for_mount "$persistent_var" "$mount_point"); then
-        printf '%s\n' "$state_path"
-    else
-        printf '%s%s\n' "$config_root" "$mount_point"
-    fi
-}
-
-prepare_mount_target() {
+prepare_physical_mount_target() {
     local requested_path=$1
     local target_path=$2
     local parent_path=$target_path
 
     # Check every component before test -d: test -d follows symlinks.  Walking
-    # through all ancestors prevents mkdir or migration from following a
-    # symlink, including when the requested descendant already exists.
+    # every requested physical ancestor prevents mkdir from following one.
     while [[ $parent_path != / ]]; do
         if [[ -L $parent_path ]]; then
             die "external volume target is a symlink: $requested_path"
@@ -72,66 +24,6 @@ prepare_mount_target() {
     mkdir -p -- "$target_path"
     [[ ! -L $target_path && -d $target_path ]] ||
         die "external volume target could not be created as a directory: $requested_path"
-}
-
-vol_prepare_targets() {
-    local config_root=$1
-    local persistent_var=$2
-    local record mount_point target_path
-
-    for record in "${vol_list[@]}"; do
-        local -n volume=$record
-        [[ ${volume[phase]:-predeploy} == postdeploy ]] || continue
-        mount_point=${volume[mountpoint]}
-        target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
-        prepare_mount_target "$mount_point" "$target_path"
-    done
-}
-
-clear_directory() {
-    local directory=$1
-    find "$directory" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-}
-
-vol_migrate_mounts() {
-    local config_root=$1
-    local persistent_var=$2
-    local record filesystem options mount_point target_path source staging
-    local -a order=()
-
-    mapfile -t order < <(volume_phase_order postdeploy)
-
-    for record in "${order[@]}"; do
-        local -n volume=$record
-        filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
-        target_path=$(mount_target_path "$config_root" "$persistent_var" "$mount_point")
-        source=${volume[_source]:-}
-        [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
-        if [[ ${volume[action]} == relation && ${volume[backing]:-} == vol_root ]]; then
-            local -n root=vol_root
-            local relation_path=$install_root
-            if [[ ${volume[subvol]:-} == "${root[subvol]:-}"/* ]]; then
-                relation_path=$install_root/${volume[subvol]#"${root[subvol]}"/}
-            fi
-            [[ $target_path == "$relation_path" ]] && continue
-        fi
-        staging=$work_root/$record
-        mkdir -p "$staging"
-        vol_mount_filesystem "$source" "$filesystem" "$options" "$staging"
-        cleanup_mounts+=("$staging")
-
-        log "Migrating existing content for $mount_point onto $source"
-        if state_path_for_mount "$persistent_var" "$mount_point" >/dev/null; then
-            chown root:root "$staging"; chmod 0755 "$staging"
-            label_new_state_path "$staging" "$mount_point" "$target_path"
-        fi
-        cp -a --reflink=auto "$target_path/." "$staging/"
-        clear_directory "$target_path"
-        umount "$staging"
-        unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
-        vol_mount_filesystem "$source" "$filesystem" "$options" "$target_path"
-        cleanup_mounts+=("$target_path")
-    done
 }
 
 configure_first_user() {

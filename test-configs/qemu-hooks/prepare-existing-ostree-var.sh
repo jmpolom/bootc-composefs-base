@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 
-# This trusted hook runs inside the Fedora CoreOS live guest, immediately before
-# Podman invokes the installer.  The host harness copies it into the guest; the
-# first two arguments and matching environment variables are stable by-id paths.
+# Prepare the retained encrypted XFS filesystem used as physical OSTree /var.
 set -Eeuo pipefail
 umask 077
 
 target_device=${1:?target disk by-id path is required}
 extra_device=${2:-${QEMU_PREINSTALL_EXTRA_DEVICE:?extra disk by-id path is required}}
 work_dir=${QEMU_PREINSTALL_WORK_DIR:?runtime directory is required}
-key_file=$work_dir/qemu-existing-ostree-opt.key
-uuid_file=$work_dir/qemu-existing-ostree-opt.uuid
+key_file=$work_dir/qemu-existing-ostree-var.key
+uuid_file=$work_dir/qemu-existing-ostree-var.uuid
 seed_mapper=qemu_existing_seed
-seed_dir=$(mktemp -d "$work_dir/qemu-existing-ostree-opt.XXXXXX")
+seed_dir=$(mktemp -d "$work_dir/qemu-existing-ostree-var.XXXXXX")
 
 recovery_key() {
-    local alphabet=bcdefghijklnrtuv
-    local alphabet_length=${#alphabet}
-    local raw='' byte index
+    local alphabet=bcdefghijklnrtuv alphabet_length=${#alphabet} raw='' byte index
     while ((${#raw} < 64)); do
         byte=$(od -An -N1 -tu1 /dev/urandom)
         index=$((byte % alphabet_length))
@@ -46,12 +42,11 @@ recovery_key >"$key_file"
 chmod 0600 "$key_file"
 cryptsetup luksFormat --batch-mode --type luks2 --key-file "$key_file" "$extra_device"
 cryptsetup open --type luks --key-file "$key_file" "$extra_device" "$seed_mapper"
-mkfs.xfs -f -L qemu_opt "/dev/mapper/$seed_mapper"
+mkfs.xfs -f -L qemu_var "/dev/mapper/$seed_mapper"
 mount -t xfs "/dev/mapper/$seed_mapper" "$seed_dir"
 mkdir -p "$seed_dir/qemu-existing"
 printf '%s\n' 'ostree existing-volume seed retained' >"$seed_dir/qemu-existing/seed-marker"
-printf '%s\n' 'ostree image content should replace this deterministic conflict marker' \
-    >"$seed_dir/qemu-existing/conflict-marker"
+printf '%s\n' 'ostree existing-volume conflict marker retained' >"$seed_dir/qemu-existing/conflict-marker"
 cryptsetup luksUUID "$extra_device" >"$uuid_file"
 chmod 0600 "$uuid_file"
 printf 'QEMU_PREINSTALL_EXISTING_UUID=%s\n' "$(<"$uuid_file")"

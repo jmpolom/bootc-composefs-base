@@ -18,10 +18,10 @@ target_disk=$(mktemp)
 target_disk_real=$(command readlink -f -- "$target_disk")
 physical_var_path=/state/os/default/var
 vol_list=(vol_root vol_boot vol_esp vol_data vol_partition_relation)
-declare -A vol_root=([action]=create [device]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create [phase]=predeploy)
-declare -A vol_boot=([action]=create [device]=$target_disk [partition_number]=2 [partition_size]=1024 [partition_type]=guid [partition_label]=boot [mountpoint]=/boot [fs]=ext4 [fs_label]=boot [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
-declare -A vol_esp=([action]=create [device]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=predeploy)
-declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none [phase]=postdeploy)
+declare -A vol_root=([action]=create [device]=$target_disk [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root [mount_options]=compress=zstd [encryption]=none [credential]=none [subvol]=root [subvol_action]=create)
+declare -A vol_boot=([action]=create [device]=$target_disk [partition_number]=2 [partition_size]=1024 [partition_type]=guid [partition_label]=boot [mountpoint]=/boot [fs]=ext4 [fs_label]=boot [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none)
+declare -A vol_esp=([action]=create [device]=$target_disk [partition_number]=1 [partition_size]=600 [partition_type]=guid [partition_label]=boot_efi [mountpoint]=/boot/efi [fs]=vfat [fs_label]=boot_efi [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none)
+declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/var/data [fs]=xfs [fs_label]=data [mount_options]=defaults [encryption]=none [credential]=none [subvol_action]=none)
 declare -A vol_partition_relation=([action]=relation)
 record_names_valid
 
@@ -75,10 +75,22 @@ assert_eq vol_var "${vol_list[4]}" 'generated relation name'
 assert_eq relation "${vol_var[action]}" 'generated relation action'
 assert_eq vol_root "${vol_var[backing]}" 'generated relation backing'
 
+# OSTree permits only the literal /var shortcut; composefs accepts all three.
+installer_backend=ostree
+separate_home=true
+if (normalize_volume_shortcuts); then die 'OSTree separate_home accepted'; fi
+separate_home=false
+separate_opt=true
+if (normalize_volume_shortcuts); then die 'OSTree separate_opt accepted'; fi
+separate_opt=false
+installer_backend=composefs
+
 if (vol_root[action]=bad; validate_volume_record vol_root); then die 'invalid action accepted'; fi
-if (vol_root[phase]=bad; validate_volume_record vol_root); then die 'invalid phase accepted'; fi
+surplus_key=$(printf %s 'p''hase')
+vol_root["$surplus_key"]=surplus
+validate_volume_record vol_root
+assert_eq surplus "${vol_root[$surplus_key]}" 'surplus phase is ignored'
 vol_root[action]=create
-vol_root[phase]=predeploy
 if (vol_data[fs_label]=; validate_volume_record vol_data); then die 'missing filesystem label accepted'; fi
 vol_data[fs_label]=data
 vol_data[subvol_action]=select
@@ -97,9 +109,16 @@ vol_data[credential]=none
 vol_data[encryption]=none
 vol_data[fs]=xfs
 if (vol_data[mount_options]=bad:option; validate_volume_record vol_data); then die 'mount delimiter accepted'; fi
+vol_data[mount_options]=defaults
+for invalid_mount in /home /opt /srv /data /var/ ../var /var/; do
+    if (vol_data[mountpoint]=$invalid_mount; validate_volume_record vol_data); then
+        die "invalid non-/var mountpoint accepted: $invalid_mount"
+    fi
+done
+vol_data[mountpoint]=/var/data
 
-declare -A vol_a=([action]=relation [backing]=vol_b [mountpoint]=/a [fs]=btrfs [subvol]=a [subvol_action]=select)
-declare -A vol_b=([action]=relation [backing]=vol_a [mountpoint]=/b [fs]=btrfs [subvol]=b [subvol_action]=select)
+declare -A vol_a=([action]=relation [backing]=vol_b [mountpoint]=/var/a [fs]=btrfs [subvol]=a [subvol_action]=select)
+declare -A vol_b=([action]=relation [backing]=vol_a [mountpoint]=/var/b [fs]=btrfs [subvol]=b [subvol_action]=select)
 vol_list+=(vol_a vol_b)
 if (validate_relation_graph); then die 'relation cycle accepted'; fi
 
@@ -118,6 +137,7 @@ fi
 if (vol_list=(vol_boot vol_root vol_esp); record_names_valid); then
     die 'wrong core record order accepted'
 fi
+declare -A vol_parent=([action]=relation [backing]=vol_root [mountpoint]=/var [fs]=btrfs [mount_options]=defaults [subvol]=var [subvol_action]=select [_source]=/dev/parent)
 vol_list=(vol_root vol_boot vol_esp vol_data)
 if (unset 'vol_data[device]'; validate_volume_record vol_data); then
     die 'missing create device accepted'
@@ -130,7 +150,7 @@ vol_root[device]=$target_disk
 
 # Partition fields are an all-or-none create tuple; retain and relation records never use them.
 declare -A vol_partitioned=([action]=create [device]=/dev/partitioned [partition_number]=4
-    [partition_size]=1024 [partition_type]=guid [partition_label]=partitioned [mountpoint]=/partitioned
+    [partition_size]=1024 [partition_type]=guid [partition_label]=partitioned [mountpoint]=/var/partitioned
     [fs]=ext4 [fs_label]=partitioned [encryption]=none [credential]=none [subvol_action]=none)
 validate_volume_record vol_partitioned
 if (unset 'vol_partitioned[partition_label]'; validate_volume_record vol_partitioned); then
@@ -139,10 +159,10 @@ fi
 if (unset 'vol_partitioned[partition_number]'; validate_volume_record vol_partitioned); then
     die 'stray partition fields on direct create accepted'
 fi
-declare -A vol_retain_schema=([action]=retain [device]=/dev/retained-schema [mountpoint]=/retained-schema
+declare -A vol_retain_schema=([action]=retain [device]=/dev/retained-schema [mountpoint]=/var/retained-schema
     [fs]=xfs [encryption]=none [credential]=none [subvol_action]=none [partition_size]=1024)
 if (validate_volume_record vol_retain_schema); then die 'partition field on retain accepted'; fi
-declare -A vol_relation_schema=([action]=relation [backing]=vol_root [mountpoint]=/relation-schema
+declare -A vol_relation_schema=([action]=relation [backing]=vol_root [mountpoint]=/var/relation-schema
     [fs]=btrfs [encryption]=none [credential]=none [subvol_action]=none [device]=/dev/invalid)
 if (validate_volume_record vol_relation_schema); then die 'device on relation accepted'; fi
 unset 'vol_relation_schema[device]'; vol_relation_schema[partition_number]=1
@@ -185,7 +205,7 @@ vol_data[encryption]=luks-create
 rm -f -- "$credential_file"
 
 # Explicit relation backing and shortcut conflicts are validated before lifecycle work.
-declare -A vol_relation=([action]=relation [backing]=vol_root [mountpoint]=/data-rel \
+declare -A vol_relation=([action]=relation [backing]=vol_root [mountpoint]=/var/data-rel \
     [fs]=btrfs [subvol]=custom-root/data [subvol_action]=select)
 vol_list+=(vol_relation)
 validate_relation_graph
@@ -200,7 +220,7 @@ vol_data[mountpoint]=/var
 if (separate_var=true; normalize_volume_shortcuts); then
     die 'shortcut mountpoint conflict accepted'
 fi
-vol_data[mountpoint]=/data
+vol_data[mountpoint]=/var/data
 
 # Environment credentials materialize into a temporary file and erase the variable immediately.
 work_root=$(mktemp -d)
@@ -312,38 +332,37 @@ assert_eq vfatext4btrfsxfs "$(<"$dispatch_log")" 'unified filesystem dispatch'; 
 bootc_args=(); append_volume_luks_kargs uuid mapper true
 assert_eq '--karg=rd.luks.name=uuid=mapper' "${bootc_args[1]}" 'unified encrypted kargs'
 
-# Mount ordering and options are shared by predeploy and postdeploy paths.
-install_root=$(mktemp -d)
+# Core mounts happen first, followed by physical /var targets in parent-first order.
+install_root=$(realpath "$(mktemp -d)")
 mount_log=$(mktemp)
 mount() { printf '%s\n' "${6}" >>"$mount_log"; }
 cleanup_mounts=()
-vol_list=(vol_root vol_boot vol_esp)
+mock_install_target_path() { printf '%s/mock-physical/var%s\n' "$1" "${2#/var}"; }
+vol_list=(vol_root vol_boot vol_esp vol_parent vol_data)
 vol_root[_source]=/dev/root
 vol_boot[_source]=/dev/boot
 vol_esp[_source]=/dev/esp
-vol_mount_phase predeploy
-assert_eq "$install_root/ $install_root/boot $install_root/boot/efi " "$(tr '\n' ' ' <"$mount_log")" 'mount depth order'
+vol_parent[_source]=/dev/parent
+vol_data[_source]=/dev/data
+installer_backend=mock
+vol_mount_install_targets
+assert_eq "$install_root/ $install_root/boot $install_root/boot/efi $install_root/mock-physical/var $install_root/mock-physical/var/data " "$(tr '\n' ' ' <"$mount_log")" 'core-first parent-first physical mount order'
 rm -f -- "$mount_log"; rm -rf -- "$install_root"
 
-# A relation without a subvolume is valid when it mounts the backing filesystem.
-# Keep this lifecycle check under set -u so optional relation fields stay guarded.
-install_root=$(mktemp -d)
+# A root-backed relation is explicitly mounted at its mapped physical target.
+install_root=$(realpath "$(mktemp -d)")
 state_root=$(mktemp -d)
-state_target=$state_root/relation
-mkdir -p "$state_target"
-work_root=$(mktemp -d)
-declare -A vol_state_root=([action]=create [fs]=btrfs [subvol]=root [mountpoint]=/ [phase]=predeploy)
-declare -A vol_state_relation=([action]=relation [backing]=vol_state_root [fs]=btrfs
-    [mountpoint]=/relation [phase]=postdeploy [_source]=/dev/state)
+state_target=$install_root/mock-physical/var/relation
+declare -A vol_state_relation=([action]=relation [backing]=vol_root [fs]=btrfs
+    [mountpoint]=/var/relation [_source]=/dev/state)
 cleanup_mounts=()
-vol_list=(vol_state_root vol_state_relation)
-vol_mount_filesystem() { :; }
-cp() { :; }
-umount() { :; }
-vol_migrate_mounts "$state_root" "$state_root/var"
-assert_eq "$state_target" "${cleanup_mounts[0]}" 'relation without subvolume migrated'
+vol_list=(vol_root vol_boot vol_esp vol_state_relation)
+vol_root[_source]=/dev/root; vol_boot[_source]=/dev/boot; vol_esp[_source]=/dev/esp
+mount_log=$(mktemp)
+vol_mount_install_targets
+assert_eq "$state_target" "${cleanup_mounts[3]}" 'root-backed relation mounted directly'
 cleanup_mounts=()
-rm -rf -- "$install_root" "$state_root" "$work_root"
+rm -f -- "$mount_log"; rm -rf -- "$install_root" "$state_root"
 
 # Backend callbacks produce distinct /var kargs while common handling remains shared.
 mock_append_external_var_karg() { bootc_args+=("mock-var=$1:$2:$3"); }
@@ -351,7 +370,6 @@ composefs_append_external_var_karg() { bootc_args+=("composefs-var=$1:$2:$3"); }
 ostree_append_external_var_karg() { bootc_args+=("ostree-var=$1:$2:$3"); }
 vol_list=(vol_root vol_boot vol_esp vol_data)
 vol_data[mountpoint]=/var
-vol_data[phase]=postdeploy
 vol_data[subvol_action]=none
 vol_root[_source]=/dev/root
 vol_data[_source]=/dev/data
@@ -367,5 +385,21 @@ for backend in composefs ostree; do
     append_common_kargs /state/mock/var mock-root.service
     assert_eq "$backend-var=/dev/data:xfs:defaults" "${bootc_args[4]}" "$backend var karg"
 done
-vol_data[mountpoint]=/data
+vol_data[mountpoint]=/var/data
+
+# Cleanup preserves the mount stack's reverse order after direct physical mounts.
+cleanup_log=$(mktemp)
+(
+    cleanup_mounts=(/mounted-core /mounted-var)
+    opened_luks_names=()
+    temporary_credential_files=()
+    external_credential_variables=()
+    install_complete=false
+    findmnt() { return 0; }
+    umount() { printf '%s\n' "$1" >>"$cleanup_log"; }
+    :
+    cleanup
+)
+assert_eq '/mounted-var /mounted-core ' "$(tr '\n' ' ' <"$cleanup_log")" 'reverse mount cleanup order'
+rm -f -- "$cleanup_log"
 printf 'storage mock checks passed\n'

@@ -58,13 +58,9 @@ composefs_preflight() {
         skip-finalize source-imgref target-imgref
 }
 
-composefs_validate_mount_target() {
-    local mount_point=$1
-    case "$mount_point" in
-        /composefs | /composefs/* | /state | /state/*)
-            die "external volume mountpoint is not a supported stateful path: $mount_point"
-            ;;
-    esac
+composefs_install_target_path() {
+    local target_root=$1 mount_point=$2
+    printf '%s/state/os/default/var%s\n' "$target_root" "${mount_point#/var}"
 }
 
 composefs_build_bootc_args() {

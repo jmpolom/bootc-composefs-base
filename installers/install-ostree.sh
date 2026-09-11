@@ -7,26 +7,20 @@ source "$script_dir/lib/common.sh"
 
 ostree_set_defaults() {
     bootloader=${bootloader:-grub}
-    stateroot=${stateroot:-default}
-    physical_var_path="/ostree/deploy/$stateroot/var"
+    physical_var_path=/ostree/deploy/default/var
     root_setup_unit=ostree-prepare-root.service
 }
 
 ostree_preflight() {
     [[ $bootloader == grub ]] || die "the OSTree installer only supports bootloader=grub"
-    [[ $stateroot =~ ^[a-z0-9][a-z0-9_.-]*$ ]] || die "stateroot must be lower case and path-safe"
     require_commands ostree
     require_bootc_options bootloader boot-mount-spec karg root-mount-spec skip-finalize \
         source-imgref target-imgref
 }
 
-ostree_validate_mount_target() {
-    local mount_point=$1
-    case "$mount_point" in
-        /ostree | /ostree/*)
-            die "external volume mountpoint is not a supported stateful path: $mount_point"
-            ;;
-    esac
+ostree_install_target_path() {
+    local target_root=$1 mount_point=$2
+    printf '%s/ostree/deploy/default/var%s\n' "$target_root" "${mount_point#/var}"
 }
 
 ostree_build_bootc_args() {
@@ -35,7 +29,7 @@ ostree_build_bootc_args() {
         install to-filesystem
         --skip-finalize
         --bootloader=grub
-        "--stateroot=$stateroot"
+        --stateroot=default
     )
 
     [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")

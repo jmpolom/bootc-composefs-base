@@ -5,6 +5,22 @@ storage=$root/installers/lib/storage.sh
 common=$root/installers/lib/common.sh
 state=$root/installers/lib/state.sh
 
+# State volumes have one pre-bootc flow.  Keep the old phase/migration code
+# from reappearing behind a compatibility branch or in the public examples.
+if rg -n '\bphase\b|volume_phase_order|vol_mount_phase|vol_migrate_mounts|vol_prepare_targets' \
+    "$root/installers" "$root/test-configs" --glob '!storage_mock.sh' --glob '!storage_architecture.sh' >/dev/null; then
+    printf 'obsolete phase workflow remains\n' >&2
+    exit 1
+fi
+if rg -n 'cp -a|clear_directory|Migrating existing content|bootc-installer-old' \
+    "$storage" "$common" "$state" >/dev/null; then
+    printf 'obsolete copy or migration implementation remains\n' >&2
+    exit 1
+fi
+rg -q 'state/os/default/var' "$root/installers/install-composefs.sh"
+rg -q 'ostree/deploy/default/var' "$root/installers/install-ostree.sh"
+rg -q -- '--stateroot=default' "$root/installers/install-ostree.sh"
+
 # Count logical commands rather than physical lines. Case terminators and the
 # separators introducing then/do/fi/etc. are shell grammar, not commands; other
 # semicolons still count, so compound-line packing cannot lower the metric.

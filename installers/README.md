@@ -10,8 +10,8 @@ Btrfs state subvolumes, and named additional volumes. They do not generate `/etc
 
 Common settings in `install.env.example` cover the target disk and image references, named storage
 records, recovery output, the first user, kernel arguments, and working paths. The final labeled
-sections contain settings specific to composefs (`bootloader` and `allow_missing_verity`) and
-OSTree (`stateroot`). The environment file is sourced as trusted Bash code.
+sections contain composefs-specific `bootloader` and `allow_missing_verity` settings. The
+environment file is sourced as trusted Bash code.
 
 The installer reads a trusted Bash configuration and requires an explicit named
 storage model. `vol_list` is an indexed list of unique shell identifiers. The
@@ -50,7 +50,7 @@ declare -A vol_root=(
   [partition_size]=remainder [partition_type]=4f68bce3-e8cd-4db1-96e7-fbcaf984b709
   [partition_label]=root [mountpoint]=/ [fs]=btrfs [fs_label]=root
   [mount_options]=compress=zstd,noatime [encryption]=none [credential]=none
-  [subvol]=root [subvol_action]=create [phase]=predeploy
+  [subvol]=root [subvol_action]=create
 )
 ```
 
@@ -63,14 +63,14 @@ records for all three core filesystems and a fourth data record.
 When true, validation generates uniquely named root-backed relation records;
 an explicit record at the same mountpoint is rejected. Relations use
 `action=relation` and `backing=<record>` and never wipe or format their backing
-filesystem. User records may not target `/`, `/boot`, `/boot/efi`, `/state`, or
-`/sysroot` trees (the core records retain their fixed roles); backend-specific
-reserved trees are rejected by the backend callback.
+filesystem. User records must target `/var` or a normalized `/var/*` descendant;
+the core records retain their fixed roles. `separate_var` works on both backends;
+`separate_home` and `separate_opt` are composefs-only.
 
 Lifecycle processing is shared for every record: normalize and validate,
 resolve dependencies, partition and wipe, create/open LUKS, create or verify a
-filesystem, handle Btrfs subvolumes, mount by mountpoint depth, migrate backend
-content, and emit mount/LUKS kernel arguments. Resolved runtime values are kept
+filesystem, handle Btrfs subvolumes, mount core records then physical state paths
+by mountpoint depth before bootc, and emit mount/LUKS kernel arguments. Resolved runtime values are kept
 in reserved record keys such as `_source`, `_partition_device`, `_luks_uuid`,
 and `_fs_uuid`.
 
@@ -79,12 +79,12 @@ and `_fs_uuid`.
 The shared libraries divide ownership cleanly: `lib/common.sh` owns CLI parsing, callback dispatch,
 orchestration, common validation, generic bootc arguments, and cleanup; `lib/storage.sh` owns
 record validation and preparation of disks, filesystems, Btrfs subvolumes, LUKS, and mounts; and
-`lib/state.sh` owns exact-path target preparation, migration, user setup, and SELinux relabeling.
+`lib/state.sh` owns safe physical-target preparation, user setup, and SELinux relabeling.
 The composefs and OSTree entrypoints own only backend paths, options, assets, and deployment lookup.
 
 Sourcing `lib/common.sh` is side-effect-free: it defines functions and globals but does not parse
 arguments, install traps, create directories, or start an installation. Each entrypoint defines
-the same callback contract (`*_set_defaults`, `*_preflight`, `*_validate_mount_target`,
+the same callback contract (`*_set_defaults`, `*_preflight`, `*_install_target_path`,
 `*_build_bootc_args`, `*_append_external_var_karg`, `*_locate_deployment`, and `*_postprocess`).
 Backend policy and assets stay in the backend entrypoint while storage, state, and orchestration
 remain shared.
@@ -124,14 +124,19 @@ bash installers/tests/storage_mock.sh
 ## Backend behavior and layout
 
 `install-composefs.sh` accepts `bootloader=grub` or `bootloader=systemd`, passes
-`--composefs-backend`, and protects `/composefs` and `/state` from volume records. Its physical
-`/var` is `/state/os/default/var`; an external filesystem targeting literal `/var` is mounted in
-the initramfs below `/sysroot/state/os/default/var` before `bootc-root-setup.service`.
+`--composefs-backend`, and maps `/var` and `/var/*` directly to physical
+`/state/os/default/var` paths before bootc runs. A literal `/var` external filesystem is mounted
+in the initramfs below `/sysroot/state/os/default/var` before `bootc-root-setup.service`.
 
-`install-ostree.sh` supports GRUB only, validates `stateroot`, passes `--stateroot`, and protects
-`/ostree` from volume records. Its physical `/var` is `/ostree/deploy/$stateroot/var`; it preserves
-the existing real-root `/var` strategy and emits `systemd.mount-extra` for literal `/var`.
-OSTree deployment lookup uses `ostree admin --sysroot=... --print-current-dir`.
+`install-ostree.sh` supports GRUB only and always passes `--stateroot=default`. It maps `/var`
+and `/var/*` directly to `/ostree/deploy/default/var` physical paths before bootc runs, and emits
+`systemd.mount-extra` for literal `/var`. OSTree deployment lookup uses
+`ostree admin --sysroot=... --print-current-dir`. The installer creates only the directory chain
+needed for those mounted physical paths: it does not initialize an OSTree repository or create an
+empty deployment. Preexisting entries in the physical var directory—or directories created to
+host nested `/var/*` mounts—make the stateroot var nonempty, so libostree skips seeding all image
+`/var` content; an empty mounted `/var` filesystem is seeded normally. Explicit nested records
+remain allowed.
 
 Partition and filesystem labels are intentionally lower case:
 
@@ -197,17 +202,17 @@ For composefs existing LUKS2+Btrfs `/var`:
   -i ghcr.io/example/os:tag
 ```
 
-For OSTree existing LUKS2+XFS `/opt`:
+For OSTree existing LUKS2+XFS `/var`:
 
 ```bash
 ./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-existing-ostree.env \
-  -H test-configs/qemu-hooks/prepare-existing-ostree-opt.sh \
+  -H test-configs/qemu-hooks/prepare-existing-ostree-var.sh \
   -i ghcr.io/example/os:tag
 ```
 
-After boot, verify recovery records, `findmnt /var` or `findmnt /opt`, and the seed marker. The
-fixture's seed marker must remain while image content replaces its conflict marker. Existing-volume
-hooks generate credentials in the guest runtime directory and do not commit secrets.
+After boot, verify recovery records, `findmnt /var`, and the seed marker. Existing contents are
+not migrated or overwritten. Existing-volume hooks generate credentials in the guest runtime
+directory and do not commit secrets.
 
 ## Removing a backend
 

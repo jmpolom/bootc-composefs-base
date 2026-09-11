@@ -34,10 +34,11 @@ cryptsetup luksFormat --batch-mode --type luks2 --key-file "$key_file" "$extra_d
 cryptsetup open --type luks --key-file "$key_file" "$extra_device" "$seed_mapper"
 mkfs.btrfs -f -L qemu_existing_var "/dev/mapper/$seed_mapper"
 mount -t btrfs "/dev/mapper/$seed_mapper" "$seed_dir"
-mkdir -p "$seed_dir/qemu-existing"
-printf '%s\n' 'composefs existing-volume seed retained' >"$seed_dir/qemu-existing/seed-marker"
-printf '%s\n' 'composefs image content should replace this deterministic conflict marker' \
-    >"$seed_dir/qemu-existing/conflict-marker"
+btrfs subvolume create "$seed_dir/var"
+mkdir -p "$seed_dir/var/qemu-existing"
+printf '%s\n' 'composefs existing-volume seed retained' >"$seed_dir/var/qemu-existing/seed-marker"
+printf '%s\n' 'composefs existing-volume conflict marker retained' \
+    >"$seed_dir/var/qemu-existing/conflict-marker"
 cryptsetup luksUUID "$extra_device" >"$uuid_file"
 chmod 0600 "$uuid_file"
 printf 'QEMU_PREINSTALL_EXISTING_UUID=%s\n' "$(<"$uuid_file")"

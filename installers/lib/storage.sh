@@ -34,12 +34,6 @@ normalize_volume_record() {
         esac
     done
 
-    if [[ -z ${volume[phase]:-} ]]; then
-        volume[phase]=postdeploy
-        if [[ $record == vol_root || $record == vol_boot || $record == vol_esp ]]; then
-            volume[phase]=predeploy
-        fi
-    fi
 }
 
 validate_volume_mount_options() {
@@ -75,6 +69,9 @@ normalize_volume_shortcuts() {
         value=${!switch:-false}
         is_boolean "$value" || die "$switch must be true or false"
         [[ $value == true ]] || continue
+        if [[ ${installer_backend:-} == ostree && $switch != separate_var ]]; then
+            die "$switch is only supported by the composefs installer"
+        fi
         case $switch in
             separate_var)
                 target=/var; subvol=${root[subvol]:-root}${physical_var_path} ;;
@@ -95,7 +92,7 @@ normalize_volume_shortcuts() {
         local -n generated=$record
         generated=([action]=relation [backing]=vol_root [mountpoint]=$target
             [fs]=btrfs [mount_options]=${root[mount_options]:-defaults}
-            [subvol]=$subvol [subvol_action]=create [phase]=postdeploy)
+            [subvol]=$subvol [subvol_action]=create)
         vol_list+=("$record")
         normalize_volume_record "$record"
         unset "$switch"
@@ -129,10 +126,9 @@ validate_volume_mount() {
 
     case "$point:$record" in
         /:vol_root|/boot:vol_boot|/boot/efi:vol_esp) ;;
-        /:*|/boot:*|/boot/*:*|/etc:*|/etc/*:*|/usr:*|/usr/*:*|/proc:*|/proc/*:*|/sys:*|/sys/*:*|/dev:*|/dev/*:*|/run:*|/run/*:*|/state:*|/state/*:*|/sysroot:*|/sysroot/*:*)
-            die "$record mountpoint is reserved: $point" ;;
+        /var:*|/var/*:*) ;;
+        *) die "$record mountpoint must be /var or a normalized /var descendant: $point" ;;
     esac
-    [[ -z ${installer_backend:-} ]] || validate_backend_mount_target "$point"
 }
 
 require_volume_fields() {
@@ -225,8 +221,6 @@ validate_volume_record() {
     case ${volume[encryption]} in none|luks-create|luks-open) ;; *) die "$record encryption is invalid" ;; esac
     case ${volume[credential]} in none|prompt|file|ephemeral|env) ;; *) die "$record credential is invalid" ;; esac
     case ${volume[subvol_action]} in none|select|create) ;; *) die "$record subvol_action is invalid" ;; esac
-    case ${volume[phase]} in predeploy|postdeploy) ;; *) die "$record phase is invalid" ;; esac
-
     validate_volume_mount "$record"
     validate_volume_format "$record"
     validate_volume_mount_options "$record"
@@ -585,7 +579,7 @@ vol_create_subvolume() {
     local source=$1
     local path=$2
     local staging=$3
-    local target old_path migrated=false
+    local target
 
     mkdir -p -- "$staging"
     vol_mount_filesystem "$source" btrfs subvolid=5 "$staging"
@@ -597,12 +591,9 @@ vol_create_subvolume() {
         target=${target%/*}; [[ -n $target ]] || target=$staging; done
     target=$staging/$path
     if ! btrfs subvolume show "$target" >/dev/null 2>&1; then
-        if [[ -e $target ]]; then
-            old_path=${target}.bootc-installer-old
-            [[ ! -e $old_path && ! -L $old_path ]] || die "temporary migration path already exists: $old_path"; mv "$target" "$old_path"; migrated=true
-        fi
+        [[ ! -e $target && ! -L $target ]] ||
+            die "volume subvolume already exists but is not a subvolume: $path"
         mkdir -p -- "$(dirname -- "$target")"; btrfs subvolume create "$target"
-        if [[ $migrated == true ]]; then chown root:root "$target"; chmod 0755 "$target"; cp -a --reflink=auto "$old_path/." "$target/"; rm -rf -- "$old_path"; fi
     fi
     umount "$staging"
     unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
@@ -620,13 +611,13 @@ vol_mount_options() {
     printf -v "$output_name" '%s' "$computed_options"
 }
 
-volume_phase_order() {
-    local phase=$1 path slashes
+volume_mount_order() {
+    local path slashes
     local record
 
     for record in "${vol_list[@]}"; do
         local -n volume=$record
-        [[ ${volume[phase]:-predeploy} == "$phase" ]] || continue
+        [[ $record != vol_root && $record != vol_boot && $record != vol_esp ]] || continue
         path=${volume[mountpoint]}
         slashes=${path//[^\/]}
         [[ $path == / ]] && slashes=
@@ -635,15 +626,25 @@ volume_phase_order() {
         sort -n -k1,1 -k2,2 | cut -f2-
 }
 
-vol_mount_phase() {
-    local phase=$1
+vol_mount_install_targets() {
     local record options target
     local -a order=()
 
-    mapfile -t order < <(volume_phase_order "$phase")
+    # Mount the bootc-visible core tree first.  Stateful mounts use backend
+    # physical paths and are parent-first by their logical /var depth.
+    for record in vol_root vol_boot vol_esp; do
+        local -n volume=$record
+        vol_mount_options options "$record"
+        target=$install_root${volume[mountpoint]}
+        vol_mount_filesystem "${volume[_source]}" "${volume[fs]}" "$options" "$target"
+        cleanup_mounts+=("$target")
+    done
+    mapfile -t order < <(volume_mount_order)
     for record in "${order[@]}"; do
         local -n volume=$record
-        vol_mount_options options "$record"; target=$install_root${volume[mountpoint]}
+        vol_mount_options options "$record"
+        target=$(backend_callback install_target_path "$install_root" "${volume[mountpoint]}")
+        prepare_physical_mount_target "${volume[mountpoint]}" "$target"
         vol_mount_filesystem "${volume[_source]}" "${volume[fs]}" "$options" "$target"; cleanup_mounts+=("$target")
     done
 }
@@ -672,5 +673,5 @@ vol_prepare_storage() {
         [[ -n ${volume[_source]:-} ]] || die "volume source is unavailable for $record"
         vol_create_subvolume "${volume[_source]}" "${volume[subvol]}" "$work_root/$record-top"
     done
-    vol_mount_phase predeploy
+    vol_mount_install_targets
 }
