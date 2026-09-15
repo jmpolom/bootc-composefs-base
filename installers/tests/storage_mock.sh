@@ -402,4 +402,236 @@ cleanup_log=$(mktemp)
 )
 assert_eq '/mounted-var /mounted-core ' "$(tr '\n' ' ' <"$cleanup_log")" 'reverse mount cleanup order'
 rm -f -- "$cleanup_log"
+# Every partial partition tuple is rejected; empty and unset fields agree.
+(
+    declare -A vol_tuple=([action]=create [device]=/dev/mock [mountpoint]=/var/mock
+        [fs]=ext4 [fs_label]=mock [backing]=vol_root)
+    fields=(partition_number partition_size partition_type partition_label)
+    values=(4 1024 guid mock)
+    for ((mask=0; mask<16; mask++)); do
+        for ((index=0; index<4; index++)); do
+            vol_tuple[${fields[index]}]=
+            if ((mask & (1 << index))); then
+                vol_tuple[${fields[index]}]=${values[index]}
+            fi
+        done
+        if ((mask == 0 || mask == 15)); then
+            validate_volume_record vol_tuple
+        else
+            assert_rejected "partial tuple $mask" validate_volume_record vol_tuple
+        fi
+    done
+    for action in create retain relation; do
+        vol_tuple[action]=$action
+        for field in "${fields[@]}"; do unset 'vol_tuple[$field]'; done
+        if [[ $action == relation ]]; then
+            vol_tuple[fs]=btrfs
+            vol_tuple[device]=
+            validate_volume_record vol_tuple
+            unset 'vol_tuple[device]'
+            validate_volume_record vol_tuple
+            vol_tuple[device]=/dev/mock
+            assert_rejected 'relation device' validate_volume_record vol_tuple
+        else
+            vol_tuple[device]=/dev/mock
+            validate_volume_record vol_tuple
+            vol_tuple[device]=
+            assert_rejected "$action empty device" validate_volume_record vol_tuple
+            unset 'vol_tuple[device]'
+            assert_rejected "$action unset device" validate_volume_record vol_tuple
+        fi
+    done
+    for action in retain relation; do
+        vol_tuple[action]=$action
+        vol_tuple[fs]=btrfs
+        vol_tuple[device]=
+        [[ $action != retain ]] || vol_tuple[device]=/dev/mock
+        for field in "${fields[@]}"; do vol_tuple[$field]=; done
+        validate_volume_record vol_tuple
+        for field in "${fields[@]}"; do
+            vol_tuple[$field]=populated
+            assert_rejected "$action populated $field" validate_volume_record vol_tuple
+            vol_tuple[$field]=
+        done
+    done
+    vol_tuple[action]=create
+    vol_tuple[device]=/dev/mock
+    for ((index=0; index<4; index++)); do
+        vol_tuple[${fields[index]}]=${values[index]}
+    done
+    vol_tuple[partition_number]=0
+    assert_rejected 'invalid partition number' validate_volume_record vol_tuple
+    vol_tuple[partition_number]=4
+    vol_tuple[partition_size]=0
+    assert_rejected 'invalid partition size' validate_volume_record vol_tuple
+    vol_tuple[partition_size]=remainder
+    validate_volume_record vol_tuple
+)
+
+# Normalization retains nondefault spellings so validation can reject them.
+(
+    declare -A vol_defaults=()
+    for spelling in unset empty none; do
+        for field in encryption credential subvol_action mount_options tpm2 recovery; do
+            unset 'vol_defaults[$field]'
+            case $spelling in empty) vol_defaults[$field]= ;; none) vol_defaults[$field]=none ;; esac
+        done
+        normalize_volume_record vol_defaults
+        for field in encryption credential subvol_action; do
+            assert_eq none "${vol_defaults[$field]}" "$spelling $field default"
+        done
+        assert_eq defaults "${vol_defaults[mount_options]}" "$spelling mount default"
+        assert_eq false "${vol_defaults[tpm2]}" "$spelling tpm default"
+        assert_eq false "${vol_defaults[recovery]}" "$spelling recovery default"
+    done
+    for field in encryption credential subvol_action mount_options tpm2 recovery; do
+        vol_defaults[$field]=nondefault
+    done
+    normalize_volume_record vol_defaults
+    for field in encryption credential subvol_action mount_options tpm2 recovery; do
+        assert_eq nondefault "${vol_defaults[$field]}" "preserve $field"
+    done
+)
+
+# Multiple disks each get one ordered command, regardless of parent-map order.
+(
+    declare -A vol_one_remainder=([action]=create [device]=/dev/one [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=one3)
+    declare -A vol_two_fixed=([action]=create [device]=/dev/two [partition_number]=2 [partition_size]=200 [partition_type]=guid [partition_label]=two2)
+    declare -A vol_one_fixed=([action]=create [device]=/dev/one [partition_number]=2 [partition_size]=100 [partition_type]=guid [partition_label]=one2)
+    declare -A vol_two_remainder=([action]=create [device]=/dev/two [partition_number]=3 [partition_size]=remainder [partition_type]=guid [partition_label]=two3)
+    declare -A vol_one_esp=([action]=create [device]=/dev/one [partition_number]=1 [partition_size]=600 [partition_type]=ef00 [partition_label]=one1)
+    declare -A vol_two_esp=([action]=create [device]=/dev/two [partition_number]=1 [partition_size]=600 [partition_type]=ef00 [partition_label]=two1)
+    vol_list=(vol_one_remainder vol_two_fixed vol_one_fixed vol_two_remainder vol_one_esp vol_two_esp)
+    calls_one=0 calls_two=0
+    readlink() { printf '%s\n' "$3"; }
+    lsblk() { case $3 in *one*) printf '/dev/one\n' ;; *two*) printf '/dev/two\n' ;; esac; }
+    sgdisk() {
+        case ${!#} in
+            /dev/one)
+                calls_one=$((calls_one + 1))
+                assert_eq '--new=2:0:+100MiB --typecode=2:guid --change-name=2:one2 --new=1:0:+600MiB --typecode=1:ef00 --change-name=1:one1 --new=3:0:0 --typecode=3:guid --change-name=3:one3 /dev/one' "$*" 'disk one partition order'
+                ;;
+            /dev/two)
+                calls_two=$((calls_two + 1))
+                assert_eq '--new=2:0:+200MiB --typecode=2:guid --change-name=2:two2 --new=1:0:+600MiB --typecode=1:ef00 --change-name=1:two1 --new=3:0:0 --typecode=3:guid --change-name=3:two3 /dev/two' "$*" 'disk two partition order'
+                ;;
+        esac
+    }
+    vol_prepare_partitions
+    assert_eq 1 "$calls_one" 'one command for disk one'
+    assert_eq 1 "$calls_two" 'one command for disk two'
+)
+
+# Named wrappers pass arguments and the underlying command status through.
+(
+    log() { :; }
+    bootc_args=(install to-filesystem '--example=two words')
+    rust_log=debug install_root=/mock/root user_password_hash=mock-hash
+    key=mock-key
+    bootc() {
+        assert_eq 'install to-filesystem --example=two words /mock/root' "$*" 'bootc arguments'
+        assert_eq debug "$RUST_LOG" 'bootc logging environment'
+        assert_eq /var/tmp "$TMPDIR" 'bootc temporary directory'
+        return "$mock_status"
+    }
+    usermod() {
+        assert_eq '--root /mock/config --password mock-hash mock-user' "$*" 'usermod arguments'
+        return "$mock_status"
+    }
+    cryptsetup() {
+        assert_eq 'open --test-passphrase --key-file=- /mock/device' "$*" 'recovery test arguments'
+        assert_eq mock-key "$(command cat)" 'recovery test input'
+        return "$mock_status"
+    }
+    for mock_status in 0 23; do
+        for wrapper in bootc password recovery; do
+            status=0
+            case $wrapper in
+                bootc) run_bootc_install || status=$? ;;
+                password) apply_user_password_hash /mock/config mock-user || status=$? ;;
+                recovery) test_recovery_key key /mock/device || status=$? ;;
+            esac
+            assert_eq "$mock_status" "$status" "$wrapper return status"
+        done
+    done
+)
+# Recovery capture and enrollment retain their explicit failure propagation.
+(
+    systemd-cryptenroll() { printf captured-output; return 29; }
+    status=0
+    capture_recovery_key captured /mock/device --unlock-key-file=/mock/key || status=$?
+    assert_eq 29 "$status" 'capture failure status'
+    assert_eq captured-output "$captured" 'capture output on failure'
+    declare -A vol_enrollment=([recovery]=true [tpm2]=true [_luks_uuid]=mock-uuid)
+    capture_recovery_key() { return 31; }
+    status=0
+    enroll_luks_credentials vol_enrollment /mock/device /mock/key || status=$?
+    assert_eq 31 "$status" 'enrollment capture failure status'
+)
+
+# Strict-shell failures must trigger EXIT cleanup with the original status.
+strict_log=$(mktemp)
+export strict_log
+for wrapper in bootc password recovery; do
+    status=0
+    bash -Eeuo pipefail -c '
+        source "$1/installers/lib/common.sh"
+        cleanup_mounts=(/mock/mount)
+        findmnt() { return 0; }
+        umount() { printf "%s\n" "$1" >>"$strict_log"; }
+        bootc() { return 23; }
+        usermod() { return 23; }
+        cryptsetup() { command cat >/dev/null; return 23; }
+        log() { :; }
+        bootc_args=() rust_log=info install_root=/mock user_password_hash=mock key=mock
+        trap cleanup EXIT
+        case $2 in
+            bootc) run_bootc_install ;;
+            password) apply_user_password_hash /mock mock ;;
+            recovery) test_recovery_key key /mock ;;
+        esac
+    ' bash "$root" "$wrapper" || status=$?
+    assert_eq 23 "$status" "$wrapper strict-shell status"
+done
+assert_eq 3 "$(wc -l <"$strict_log" | tr -d ' ')" 'strict-shell cleanup ran for all wrappers'
+rm -f -- "$strict_log"
+
+# A missing external mapper name stays fatal only when a LUKS UUID is present.
+(
+    unset 'vol_data[luks_name]'
+    vol_data[_luks_uuid]=
+    append_common_kargs /mock mock.service
+    vol_data[_luks_uuid]=mock-uuid
+    assert_rejected 'missing external LUKS name' append_common_kargs /mock mock.service
+)
+
+# Source guest configs in isolated shells with mocked credential reads. These
+# paths belong to QEMU; never evaluate their cat expressions against the host.
+for config in "$root"/test-configs/*.env; do
+    bash -Eeuo pipefail -c '
+        source "$1/installers/lib/common.sh"
+        cat() {
+            case $1 in
+                /run/test-install-qemu-bootc/qemu-existing-*-var.key) printf mock-credential ;;
+                *) return 98 ;;
+            esac
+        }
+        source "$2"
+        set_defaults
+        record_names_valid
+        recovery_records=0
+        for record in "${vol_list[@]}"; do
+            validate_volume_record "$record"
+            declare -n volume=$record
+            if [[ ${volume[recovery]} == true ]]; then
+                recovery_records=$((recovery_records + 1))
+            fi
+        done
+        [[ $recovery_records == 2 ]]
+        if [[ ${vol_var[action]} == retain ]]; then
+            [[ $lvc_existing_var == mock-credential ]]
+            [[ ${vol_var[luks_name]} == existing_var ]]
+        fi
+    ' bash "$root" "$config"
+done
 printf 'storage mock checks passed\n'

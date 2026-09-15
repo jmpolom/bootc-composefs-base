@@ -23,17 +23,22 @@ validate_storage_label() {
 }
 
 normalize_volume_record() {
-    local record=$1 field
+    local record=$1
     local -n volume=$record
 
-    for field in encryption credential subvol_action mount_options tpm2 recovery; do
-        volume["$field"]=${volume[$field]:-none}
-        case $field:${volume[$field]} in
-            mount_options:none) volume[mount_options]=defaults ;;
-            tpm2:none|recovery:none) volume["$field"]=false ;;
-        esac
-    done
-
+    volume[encryption]=${volume[encryption]:-none}
+    volume[credential]=${volume[credential]:-none}
+    volume[subvol_action]=${volume[subvol_action]:-none}
+    # Accept the legacy none spelling alongside empty or unset defaults.
+    if [[ ${volume[mount_options]:-none} == none ]]; then
+        volume[mount_options]=defaults
+    fi
+    if [[ ${volume[tpm2]:-none} == none ]]; then
+        volume[tpm2]=false
+    fi
+    if [[ ${volume[recovery]:-none} == none ]]; then
+        volume[recovery]=false
+    fi
 }
 
 validate_volume_mount_options() {
@@ -227,18 +232,29 @@ validate_volume_record() {
     validate_volume_crypto "$record"
     local number=${volume[partition_number]:-}
 
-    case ${volume[action]}:${volume[device]:+set}:${number:+set}:${volume[partition_size]:+set}${volume[partition_type]:+set}${volume[partition_label]:+set} in
-    create:set:set:setsetset)
-        [[ $number =~ ^[1-9][0-9]*$ ]] || die "$record partition_number is invalid"
-        [[ ${volume[partition_size]} == remainder || ${volume[partition_size]} =~ ^[1-9][0-9]*$ ]] ||
-            die "$record partition_size is invalid"
-        ;;
-    create:set::) ;;
-    create:*:*) die "$record requires device and a complete partition tuple" ;;
-    retain:set::) ;;
-    retain:*) die "$record retain fields are invalid" ;;
-    relation:::) ;;
-    relation:*) die "$record relation must not specify device or partition fields" ;;
+    case ${volume[action]} in
+        create)
+            [[ -n ${volume[device]:-} ]] || die "$record requires device and a complete partition tuple"
+            if [[ -n $number || -n ${volume[partition_size]:-} ||
+                -n ${volume[partition_type]:-} || -n ${volume[partition_label]:-} ]]; then
+                [[ -n $number && -n ${volume[partition_size]:-} &&
+                    -n ${volume[partition_type]:-} && -n ${volume[partition_label]:-} ]] ||
+                    die "$record requires device and a complete partition tuple"
+                [[ $number =~ ^[1-9][0-9]*$ ]] || die "$record partition_number is invalid"
+                [[ ${volume[partition_size]} == remainder || ${volume[partition_size]} =~ ^[1-9][0-9]*$ ]] ||
+                    die "$record partition_size is invalid"
+            fi
+            ;;
+        retain)
+            [[ -n ${volume[device]:-} && -z $number && -z ${volume[partition_size]:-} &&
+                -z ${volume[partition_type]:-} && -z ${volume[partition_label]:-} ]] ||
+                die "$record retain fields are invalid"
+            ;;
+        relation)
+            [[ -z ${volume[device]:-} && -z $number && -z ${volume[partition_size]:-} &&
+                -z ${volume[partition_type]:-} && -z ${volume[partition_label]:-} ]] ||
+                die "$record relation must not specify device or partition fields"
+            ;;
     esac
 }
 
@@ -374,45 +390,57 @@ wait_for_device() {
     local remaining=30
 
     while ((remaining-- > 0)); do
-        udevadm settle; [[ -b $path ]] && return 0; sleep 1
-    done; die "timed out waiting for $path"
+        udevadm settle
+        [[ -b $path ]] && return 0
+        sleep 1
+    done
+    die "timed out waiting for $path"
 }
 
 vol_clear_parent() {
     local parent=$1
 
-    log "Erasing storage parent $parent"; lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$parent"
-    wipefs --all --force "$parent"; sgdisk --zap-all "$parent"
+    log "Erasing storage parent $parent"
+    lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE,FSTYPE,MOUNTPOINTS "$parent"
+    wipefs --all --force "$parent"
+    sgdisk --zap-all "$parent"
 }
 
 vol_prepare_partitions() {
-    local record parent size resolved
+    local record parent partition_end resolved
     local -A parents=()
-    local -a args=()
+    local -a args=() fixed_records=() remainder_records=()
 
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create && -n ${volume[partition_number]:-} ]] || continue
-        parent=$(readlink -f -- "${volume[device]}"); parents[$parent]=1; done
+        parent=$(readlink -f -- "${volume[device]}")
+        parents[$parent]=1
+    done
 
     for parent in "${!parents[@]}"; do
         vol_clear_parent "$parent"
         args=()
+        fixed_records=()
+        remainder_records=()
         for record in "${vol_list[@]}"; do
             local -n volume=$record
             [[ $(readlink -f -- "${volume[device]:-}") == "$parent" &&
-                -n ${volume[partition_number]:-} && ${volume[partition_size]} != remainder ]] || continue
-            size=${volume[partition_size]}
-            args+=("--new=${volume[partition_number]}:0:+${size}MiB"
-                "--typecode=${volume[partition_number]}:${volume[partition_type]}"
-                "--change-name=${volume[partition_number]}:${volume[partition_label]}")
+                -n ${volume[partition_number]:-} ]] || continue
+            if [[ ${volume[partition_size]} == remainder ]]; then
+                remainder_records+=("$record")
+            else
+                fixed_records+=("$record")
+            fi
         done
 
-        for record in "${vol_list[@]}"; do
+        for record in "${fixed_records[@]}" "${remainder_records[@]}"; do
             local -n volume=$record
-            [[ $(readlink -f -- "${volume[device]:-}") == "$parent" &&
-                -n ${volume[partition_number]:-} && ${volume[partition_size]} == remainder ]] || continue
-            args+=("--new=${volume[partition_number]}:0:0"
+            partition_end=0
+            if [[ ${volume[partition_size]} != remainder ]]; then
+                partition_end=+${volume[partition_size]}MiB
+            fi
+            args+=("--new=${volume[partition_number]}:0:$partition_end"
                 "--typecode=${volume[partition_number]}:${volume[partition_type]}"
                 "--change-name=${volume[partition_number]}:${volume[partition_label]}")
         done
@@ -424,7 +452,8 @@ vol_prepare_partitions() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ -n ${volume[partition_number]:-} ]] || continue
-        volume[_partition_device]=/dev/disk/by-partlabel/${volume[partition_label]}; wait_for_device "${volume[_partition_device]}"
+        volume[_partition_device]=/dev/disk/by-partlabel/${volume[partition_label]}
+        wait_for_device "${volume[_partition_device]}"
         resolved=$(readlink -f -- "${volume[_partition_device]}")
         [[ $(lsblk -nrpo PKNAME "$resolved" | head -n1) == "$(readlink -f -- "${volume[device]}")" ]] ||
             die "${volume[_partition_device]} is not on expected device ${volume[device]}"
@@ -532,7 +561,11 @@ vol_prepare_existing() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == retain ]] || continue
-        if [[ ${volume[encryption]} == none ]]; then volume[_source]=${volume[device]}; else vol_activate_luks "$record"; fi
+        if [[ ${volume[encryption]} == none ]]; then
+            volume[_source]=${volume[device]}
+        else
+            vol_activate_luks "$record"
+        fi
         actual=$(blkid -s TYPE -o value "${volume[_source]}")
         [[ $actual == "${volume[fs]}" ]] || die "$record filesystem mismatch (expected ${volume[fs]}, found ${actual:-unknown})"
         volume[_fs_uuid]=$(blkid -s UUID -o value "${volume[_source]}")
@@ -548,8 +581,11 @@ vol_prepare_filesystems() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ ${volume[action]} == create ]] || continue
-        if [[ -n ${volume[partition_number]:-} ]]; then device=${volume[_partition_device]}; else
-            device=${volume[device]}; vol_clear_parent "$(readlink -f -- "$device")"
+        if [[ -n ${volume[partition_number]:-} ]]; then
+            device=${volume[_partition_device]}
+        else
+            device=${volume[device]}
+            vol_clear_parent "$(readlink -f -- "$device")"
         fi
         if [[ ${volume[encryption]} == luks-create ]]; then
             vol_activate_luks "$record"
@@ -559,9 +595,13 @@ vol_prepare_filesystems() {
         label=${volume[fs_label]}
         udevadm settle
         wait_for_device "/dev/disk/by-label/$label"
-        volume[_source]=/dev/disk/by-label/$label; volume[_fs_uuid]=$(blkid -s UUID -o value "${volume[_source]}")
+        volume[_source]=/dev/disk/by-label/$label
+        volume[_fs_uuid]=$(blkid -s UUID -o value "${volume[_source]}")
         [[ -n ${volume[_fs_uuid]} ]] || die "could not determine filesystem UUID for $record"
-        case ${volume[mountpoint]} in /boot) boot_filesystem_uuid=${volume[_fs_uuid]} ;; /boot/efi) efi_filesystem_uuid=${volume[_fs_uuid]} ;; esac
+        case ${volume[mountpoint]} in
+            /boot) boot_filesystem_uuid=${volume[_fs_uuid]} ;;
+            /boot/efi) efi_filesystem_uuid=${volume[_fs_uuid]} ;;
+        esac
     done
 }
 
@@ -587,13 +627,18 @@ vol_create_subvolume() {
     target=$staging/$path
     while [[ $target != "$staging" ]]; do
         [[ ! -L $target ]] || die "volume subvolume is a symlink: ${target#"$staging/"}"
-        if [[ -e $target ]]; then [[ -d $target ]] || die "volume subvolume is not a directory: ${target#"$staging/"}"; fi
-        target=${target%/*}; [[ -n $target ]] || target=$staging; done
+        if [[ -e $target ]]; then
+            [[ -d $target ]] || die "volume subvolume is not a directory: ${target#"$staging/"}"
+        fi
+        target=${target%/*}
+        [[ -n $target ]] || target=$staging
+    done
     target=$staging/$path
     if ! btrfs subvolume show "$target" >/dev/null 2>&1; then
         [[ ! -e $target && ! -L $target ]] ||
             die "volume subvolume already exists but is not a subvolume: $path"
-        mkdir -p -- "$(dirname -- "$target")"; btrfs subvolume create "$target"
+        mkdir -p -- "$(dirname -- "$target")"
+        btrfs subvolume create "$target"
     fi
     umount "$staging"
     unset "cleanup_mounts[$((${#cleanup_mounts[@]} - 1))]"
@@ -645,7 +690,8 @@ vol_mount_install_targets() {
         vol_mount_options options "$record"
         target=$(backend_callback install_target_path "$install_root" "${volume[mountpoint]}")
         prepare_physical_mount_target "${volume[mountpoint]}" "$target"
-        vol_mount_filesystem "${volume[_source]}" "${volume[fs]}" "$options" "$target"; cleanup_mounts+=("$target")
+        vol_mount_filesystem "${volume[_source]}" "${volume[fs]}" "$options" "$target"
+        cleanup_mounts+=("$target")
     done
 }
 

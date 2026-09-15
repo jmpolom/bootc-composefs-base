@@ -71,14 +71,7 @@ configure_first_user() {
 apply_user_password_hash() {
     local config_root=$1
     local user_name=$2
-    local status
-
-    if usermod --root "$config_root" --password "$user_password_hash" "$user_name"; then
-        status=0
-    else
-        status=$?
-    fi
-    return "$status"
+    usermod --root "$config_root" --password "$user_password_hash" "$user_name"
 }
 
 relabel_target_paths() {

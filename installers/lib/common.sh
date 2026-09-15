@@ -137,10 +137,6 @@ require_commands() {
     done
 }
 
-is_canonical_guid() {
-    [[ ${1:-} =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
-}
-
 # Validate a mount target's spelling without resolving filesystem symlinks.
 # Mount targets are interpreted in the installed tree later, where symlink and
 # file-type checks must inspect the requested literal path.  Keep this check
@@ -154,32 +150,6 @@ is_normalized_absolute_path() {
     case "$path" in
         */./* | */../* | */. | */..) return 1 ;;
     esac
-}
-
-validate_canonical_guid() {
-    local guid=$1 description=${2:-GUID}
-    is_canonical_guid "$guid" ||
-        die "$description must use canonical 8-4-4-4-12 hexadecimal syntax: $guid"
-}
-
-require_readable_file() {
-    local path=$1 description=${2:-file}
-    [[ -f $path && -r $path ]] || die "$description is not a readable regular file: $path"
-}
-
-validate_backend_templates() {
-    local description=$1
-    shift
-    (($# > 0)) || die "at least one backend template is required"
-    local path
-    for path in "$@"; do
-        require_readable_file "$path" "$description"
-    done
-}
-
-validate_backend_tools() {
-    (($# > 0)) || die "at least one backend tool is required"
-    require_commands "$@"
 }
 
 validate_usable_directory() {
@@ -273,13 +243,8 @@ capture_recovery_key() {
 }
 
 test_recovery_key() {
-    local key_name=$1 device=$2 status
-    if printf '%s' "${!key_name-}" | cryptsetup open --test-passphrase --key-file=- "$device"; then
-        status=0
-    else
-        status=$?
-    fi
-    return "$status"
+    local key_name=$1 device=$2
+    printf '%s' "${!key_name-}" | cryptsetup open --test-passphrase --key-file=- "$device"
 }
 
 validate_recovery_key() {
@@ -456,7 +421,10 @@ append_common_kargs() {
     for record in "${vol_list[@]}"; do
         local -n volume=$record
         [[ $record != vol_root && $record != vol_boot && $record != vol_esp ]] || continue
-        source=${volume[_source]:-}; filesystem=${volume[fs]}; vol_mount_options options "$record"; mount_point=${volume[mountpoint]}
+        source=${volume[_source]:-}
+        filesystem=${volume[fs]}
+        vol_mount_options options "$record"
+        mount_point=${volume[mountpoint]}
         [[ -n $source ]] || die "external volume source is unavailable for $mount_point"
         if [[ $mount_point == /var ]]; then
             append_external_var_karg "$source" "$filesystem" "$options"
@@ -466,22 +434,16 @@ append_common_kargs() {
 
         uuid=${volume[_luks_uuid]:-}
         if [[ -n $uuid ]]; then
-            luks_name=${volume[luks_name]}; append_volume_luks_kargs "$uuid" "$luks_name" "${volume[tpm2]:-false}"
+            luks_name=${volume[luks_name]}
+            append_volume_luks_kargs "$uuid" "$luks_name" "${volume[tpm2]:-false}"
         fi
     done
 }
 
 run_bootc_install() {
-    local status
-
     log "bootc arguments: ${bootc_args[*]}"
     log "Starting bootc deployment"
-    if RUST_LOG=$rust_log TMPDIR=/var/tmp bootc "${bootc_args[@]}" "$install_root"; then
-        status=0
-    else
-        status=$?
-    fi
-    return "$status"
+    RUST_LOG=$rust_log TMPDIR=/var/tmp bootc "${bootc_args[@]}" "$install_root"
 }
 
 finish_installation() {
