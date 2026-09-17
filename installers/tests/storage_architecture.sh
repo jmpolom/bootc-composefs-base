@@ -21,6 +21,7 @@ fi
 rg -q 'state/os/default/var' "$root/installers/install-composefs.sh"
 rg -q 'ostree/deploy/default/var' "$root/installers/install-ostree.sh"
 rg -q -- '--stateroot=default' "$root/installers/install-ostree.sh"
+rg -q 'setfiles -F -c "\$policy" -r "\$config_root"' "$state"
 
 # QEMU fixtures are backend-neutral and the retained config matches its single preparation hook.
 if rg -n 'qemu-ostree\.env|qemu-existing-(composefs|ostree)\.env|prepare-existing-(composefs|ostree)-var' \

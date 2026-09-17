@@ -385,6 +385,24 @@ assert_eq "$state_target" "${cleanup_mounts[3]}" 'root-backed relation mounted d
 cleanup_mounts=()
 rm -f -- "$mount_log"; rm -rf -- "$install_root" "$state_root"
 
+# Relabeling validates file contexts against the newest target policy binary.
+(
+    config_root=$(mktemp -d)
+    contexts=$config_root/etc/selinux/targeted/contexts/files/file_contexts
+    policy_dir=$config_root/etc/selinux/targeted/policy
+    mkdir -p "${contexts%/*}" "$policy_dir"
+    : >"$contexts"
+    : >"$policy_dir/policy.31"
+    : >"$policy_dir/policy.33"
+    setfiles() { printf '%s\n' "$*" >"$config_root/setfiles.args"; }
+    relabel_target_paths "$config_root"
+    assert_eq "-F -c $policy_dir/policy.33 -r $config_root $contexts $config_root/etc" \
+        "$(<"$config_root/setfiles.args")" 'target policy used for relabeling'
+    rm -f -- "$policy_dir"/policy.*
+    assert_rejected 'missing target SELinux policy' relabel_target_paths "$config_root"
+    rm -rf -- "$config_root"
+)
+
 # Backend callbacks produce distinct /var kargs while common handling remains shared.
 mock_append_external_var_karg() { bootc_args+=("mock-var=$1:$2:$3"); }
 composefs_append_external_var_karg() { bootc_args+=("composefs-var=$1:$2:$3"); }

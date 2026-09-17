@@ -77,10 +77,14 @@ apply_user_password_hash() {
 relabel_target_paths() {
     local config_root=$1
     local contexts=$config_root/etc/selinux/targeted/contexts/files/file_contexts
+    local policy_dir=$config_root/etc/selinux/targeted/policy policy
+    local -a policies=("$policy_dir"/policy.*)
     command -v setfiles >/dev/null 2>&1 || return 0
     [[ -r $contexts ]] || return 0
+    policy=$(printf '%s\n' "${policies[@]}" | sort -V | tail -n1)
+    [[ -r $policy ]] || die "target SELinux policy binary is missing"
 
     log "Applying target SELinux labels to mutable state"
-    setfiles -F -r "$config_root" "$contexts" "$config_root/etc" ||
+    setfiles -F -c "$policy" -r "$config_root" "$contexts" "$config_root/etc" ||
         die "failed to label target configuration"
 }
