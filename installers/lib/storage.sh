@@ -328,6 +328,52 @@ validate_volume_devices() {
     done
 }
 
+partitioned_create_records_for_parent() {
+    local parent=$1 record
+
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[action]} == create && -n ${volume[partition_number]:-} ]] || continue
+        [[ $(readlink -f -- "${volume[device]}") == "$parent" ]] || continue
+        printf '%s %s\n' "${volume[partition_number]}" "$record"
+    done | sort -n -k1,1 | cut -d' ' -f2-
+}
+
+validate_partition_remainders() {
+    local parent record remainder_count remainder_record last_record=''
+    local -A parents=()
+    local -a records=()
+
+    for record in "${vol_list[@]}"; do
+        local -n volume=$record
+        [[ ${volume[action]} == create && -n ${volume[partition_number]:-} ]] || continue
+        parent=$(readlink -f -- "${volume[device]}")
+        parents[$parent]=1
+    done
+
+    for parent in "${!parents[@]}"; do
+        mapfile -t records < <(partitioned_create_records_for_parent "$parent")
+        remainder_count=0
+        remainder_record=''
+        last_record=${records[-1]}
+        for record in "${records[@]}"; do
+            local -n volume=$record
+            [[ ${volume[partition_size]} == remainder ]] || continue
+            remainder_count=$((remainder_count + 1))
+            remainder_record=$record
+        done
+        case $remainder_count in
+            0) ;;
+            1)
+                local -n remainder=$remainder_record
+                [[ $remainder_record == "$last_record" ]] ||
+                    die "remainder partition must have the highest partition_number on device ${remainder[device]}"
+                ;;
+            *) die "device $parent has more than one remainder partition" ;;
+        esac
+    done
+}
+
 validate_vol_config() {
     local record other key
     local -A paths=() names=() partitions=() labels=()
@@ -381,6 +427,7 @@ validate_vol_config() {
         fi
     done
 
+    validate_partition_remainders
     validate_relation_graph
     validate_volume_devices
 }
@@ -409,7 +456,7 @@ vol_clear_parent() {
 vol_prepare_partitions() {
     local record parent partition_end resolved
     local -A parents=()
-    local -a args=() fixed_records=() remainder_records=()
+    local -a args=() records=()
 
     for record in "${vol_list[@]}"; do
         local -n volume=$record
@@ -421,20 +468,8 @@ vol_prepare_partitions() {
     for parent in "${!parents[@]}"; do
         vol_clear_parent "$parent"
         args=()
-        fixed_records=()
-        remainder_records=()
-        for record in "${vol_list[@]}"; do
-            local -n volume=$record
-            [[ $(readlink -f -- "${volume[device]:-}") == "$parent" &&
-                -n ${volume[partition_number]:-} ]] || continue
-            if [[ ${volume[partition_size]} == remainder ]]; then
-                remainder_records+=("$record")
-            else
-                fixed_records+=("$record")
-            fi
-        done
-
-        for record in "${fixed_records[@]}" "${remainder_records[@]}"; do
+        mapfile -t records < <(partitioned_create_records_for_parent "$parent")
+        for record in "${records[@]}"; do
             local -n volume=$record
             partition_end=0
             if [[ ${volume[partition_size]} != remainder ]]; then

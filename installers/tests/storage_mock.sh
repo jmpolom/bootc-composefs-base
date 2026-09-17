@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2030,SC2031,SC2034,SC2154
+# shellcheck disable=SC2030,SC2031,SC2034,SC2153,SC2154,SC2329
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$root/installers/lib/common.sh"
@@ -25,8 +25,8 @@ declare -A vol_data=([action]=create [device]=/dev/data [mountpoint]=/var/data [
 declare -A vol_partition_relation=([action]=relation)
 record_names_valid
 
-# Partition creation keeps the required root-first vol_list order while placing
-# the remainder partition after all fixed-size partitions in the sgdisk call.
+# Partition creation follows numeric partition_number order even though the
+# required core records are listed root, boot, ESP.
 partition_args=()
 vol_clear_parent() { :; }
 sgdisk() { partition_args=("$@"); }
@@ -41,10 +41,31 @@ readlink() {
 }
 lsblk() { printf '%s\n' "$(readlink -f -- "$target_disk")"; }
 vol_prepare_partitions
-assert_eq "--new=2:0:+1024MiB --typecode=2:guid --change-name=2:boot --new=1:0:+600MiB --typecode=1:guid --change-name=1:boot_efi --new=3:0:0 --typecode=3:guid --change-name=3:root $target_disk_real" \
-    "${partition_args[*]}" 'sgdisk fixed-size partitions precede remainder'
+assert_eq "--new=1:0:+600MiB --typecode=1:guid --change-name=1:boot_efi --new=2:0:+1024MiB --typecode=2:guid --change-name=2:boot --new=3:0:0 --typecode=3:guid --change-name=3:root $target_disk_real" \
+    "${partition_args[*]}" 'sgdisk follows numeric partition order'
 assert_eq /dev/disk/by-partlabel/root "${vol_root[_partition_device]}" 'generated partition device'
 rm -f -- "$target_disk"
+
+# Invalid remainder layouts fail preflight before partition preparation can erase a disk.
+(
+    parent=$(mktemp)
+    erase_log=$(mktemp)
+    declare -A vol_first=([action]=create [device]=$parent [partition_number]=1 [partition_size]=remainder)
+    declare -A vol_last=([action]=create [device]=$parent [partition_number]=2 [partition_size]=100)
+    vol_list=(vol_last vol_first)
+    vol_clear_parent() { printf erased >>"$erase_log"; }
+    prepare_after_validation() {
+        validate_partition_remainders
+        vol_prepare_partitions
+    }
+    assert_rejected 'non-highest remainder partition' prepare_after_validation
+    [[ ! -s $erase_log ]] || die 'non-highest remainder erased its parent'
+
+    vol_last[partition_size]=remainder
+    assert_rejected 'multiple remainder partitions' prepare_after_validation
+    [[ ! -s $erase_log ]] || die 'multiple remainders erased their parent'
+    rm -f -- "$parent" "$erase_log"
+)
 
 minimum_size_root=$(mktemp -d)
 minimum_size_target=$minimum_size_root/target
@@ -509,11 +530,11 @@ rm -f -- "$cleanup_log"
         case ${!#} in
             /dev/one)
                 calls_one=$((calls_one + 1))
-                assert_eq '--new=2:0:+100MiB --typecode=2:guid --change-name=2:one2 --new=1:0:+600MiB --typecode=1:ef00 --change-name=1:one1 --new=3:0:0 --typecode=3:guid --change-name=3:one3 /dev/one' "$*" 'disk one partition order'
+                assert_eq '--new=1:0:+600MiB --typecode=1:ef00 --change-name=1:one1 --new=2:0:+100MiB --typecode=2:guid --change-name=2:one2 --new=3:0:0 --typecode=3:guid --change-name=3:one3 /dev/one' "$*" 'disk one partition order'
                 ;;
             /dev/two)
                 calls_two=$((calls_two + 1))
-                assert_eq '--new=2:0:+200MiB --typecode=2:guid --change-name=2:two2 --new=1:0:+600MiB --typecode=1:ef00 --change-name=1:two1 --new=3:0:0 --typecode=3:guid --change-name=3:two3 /dev/two' "$*" 'disk two partition order'
+                assert_eq '--new=1:0:+600MiB --typecode=1:ef00 --change-name=1:two1 --new=2:0:+200MiB --typecode=2:guid --change-name=2:two2 --new=3:0:0 --typecode=3:guid --change-name=3:two3 /dev/two' "$*" 'disk two partition order'
                 ;;
         esac
     }
@@ -608,15 +629,17 @@ rm -f -- "$strict_log"
 # Source guest configs in isolated shells with mocked credential reads. These
 # paths belong to QEMU; never evaluate their cat expressions against the host.
 for config in "$root"/test-configs/*.env; do
-    bash -Eeuo pipefail -c '
+    for backend in composefs ostree; do
+        bash -Eeuo pipefail -c '
         source "$1/installers/lib/common.sh"
         cat() {
             case $1 in
-                /run/test-install-qemu-bootc/qemu-existing-*-var.key) printf mock-credential ;;
+                /run/test-install-qemu-bootc/qemu-retained-*.key) printf mock-credential ;;
                 *) return 98 ;;
             esac
         }
         source "$2"
+        installer_backend=$3
         set_defaults
         record_names_valid
         recovery_records=0
@@ -627,11 +650,16 @@ for config in "$root"/test-configs/*.env; do
                 recovery_records=$((recovery_records + 1))
             fi
         done
-        [[ $recovery_records == 2 ]]
-        if [[ ${vol_var[action]} == retain ]]; then
-            [[ $lvc_existing_var == mock-credential ]]
-            [[ ${vol_var[luks_name]} == existing_var ]]
+        expected=2
+        if [[ $2 == *qemu-existing-default.env ]]; then
+            expected=3
+            [[ $lvc_retained_btrfs == mock-credential ]]
+            [[ $lvc_retained_xfs == mock-credential ]]
+            [[ ${vol_retained_btrfs[device]} == /dev/disk/by-partlabel/qemu_retained_btrfs ]]
+            [[ ${vol_retained_xfs[device]} == /dev/disk/by-partlabel/qemu_retained_xfs ]]
         fi
-    ' bash "$root" "$config"
+        [[ $recovery_records == "$expected" ]]
+    ' bash "$root" "$config" "$backend"
+    done
 done
 printf 'storage mock checks passed\n'

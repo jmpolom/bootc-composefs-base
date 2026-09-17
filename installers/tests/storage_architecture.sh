@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 storage=$root/installers/lib/storage.sh
@@ -20,6 +21,21 @@ fi
 rg -q 'state/os/default/var' "$root/installers/install-composefs.sh"
 rg -q 'ostree/deploy/default/var' "$root/installers/install-ostree.sh"
 rg -q -- '--stateroot=default' "$root/installers/install-ostree.sh"
+
+# QEMU fixtures are backend-neutral and the retained config matches its single preparation hook.
+if rg -n 'qemu-ostree\.env|qemu-existing-(composefs|ostree)\.env|prepare-existing-(composefs|ostree)-var' \
+    "$root" --glob '!qemu-test*/**' --glob '!.git/**' >/dev/null; then
+    printf 'deleted backend-specific QEMU fixture name remains\n' >&2
+    exit 1
+fi
+for label in qemu_retained_btrfs qemu_retained_xfs; do
+    rg -q "/dev/disk/by-partlabel/$label" "$root/test-configs/qemu-existing-default.env"
+    rg -q -- "--change-name=[12]:$label" "$root/test-configs/qemu-hooks/prepare-existing-default.sh"
+done
+for name in retained_btrfs retained_xfs; do
+    rg -q "lvc_$name=" "$root/test-configs/qemu-existing-default.env"
+    rg -q "qemu-retained-${name#retained_}\.key" "$root/test-configs/qemu-hooks/prepare-existing-default.sh"
+done
 
 # Count logical commands rather than physical lines. Case terminators and the
 # separators introducing then/do/fi/etc. are shell grammar, not commands; other
@@ -123,9 +139,9 @@ printf 'whole current: physical=%s executable=%s aggregate_cc=%s max_function_lo
 printf 'whole HEAD: physical=storage:%s common:%s state:%s executable=%s aggregate_cc=%s max_function_loc=%s(%s) max_function_cc=%s(%s) functions=%s\n' \
     "$(git show HEAD:installers/lib/storage.sh | wc -l)" "$(git show HEAD:installers/lib/common.sh | wc -l)" "$(git show HEAD:installers/lib/state.sh | wc -l)" "$whole_head_exec" "$whole_head_cc" "$whole_head_max_exec" "$whole_head_max_exec_name" "$whole_head_max_cc" "$whole_head_max_cc_name" "$whole_head_functions"
 metric_failure=false
-# Explicit partition-field boolean checks replace encoded presence dispatch.
-# The measured aggregate baseline is 164; retain the existing per-function cap.
-((current_cc <= 164)) || { printf 'UNMET storage aggregate CC target: %s > 164\n' "$current_cc" >&2; metric_failure=true; }
+# Numeric per-parent ordering and remainder preflight add two focused helpers.
+# The measured aggregate baseline is 171; retain the existing per-function cap.
+((current_cc <= 171)) || { printf 'UNMET storage aggregate CC target: %s > 171\n' "$current_cc" >&2; metric_failure=true; }
 ((current_max_cc <= 18)) || { printf 'UNMET max function CC: %s > 18 (%s)\n' "$current_max_cc" "$current_max_cc_name" >&2; metric_failure=true; }
 [[ $metric_failure == true ]] && exit 1
 printf 'storage architecture checks passed (physical LOC=%s)\n' "$physical"

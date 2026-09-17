@@ -591,6 +591,19 @@ if [[ -n $preinstall_hook ]]; then
         QEMU_PREINSTALL_WORK_DIR="$runtime_dir" \
         "$preinstall_hook" "$target_device" "$extra_device" "$scratch_device"
 fi
+EXPECTED_RECOVERY_RECORDS=$(
+    source "$install_config"
+    count=0
+    for record in "${vol_list[@]}"; do
+        declare -n volume=$record
+        if [[ ${volume[recovery]:-false} == true ]]; then
+            count=$((count + 1))
+        fi
+    done
+    printf '%s\n' "$count"
+)
+[[ $EXPECTED_RECOVERY_RECORDS =~ ^[0-9]+$ ]]
+export EXPECTED_RECOVERY_RECORDS
 [[ -b $scratch_device ]] || {
     echo "Temporary-storage disk did not appear: $scratch_device" >&2
     exit 1
@@ -627,8 +640,8 @@ podman run --rm --pull=never --privileged \
     --entrypoint "/usr/libexec/bootc-installer/$installer_name" \
     "$image_ref" \
     "${installer_args[@]}"
-[[ $(wc -l <"$recovery_file") -eq 2 ]] || {
-    echo "Expected two recovery-key records" >&2
+[[ $(wc -l <"$recovery_file") -eq $EXPECTED_RECOVERY_RECORDS ]] || {
+    echo "Expected $EXPECTED_RECOVERY_RECORDS recovery-key records" >&2
     exit 1
 }
 EOF
@@ -878,7 +891,7 @@ validate_recovery_output() {
         $1 !~ /^[0-9a-fA-F-]{36}$/ { exit 1 }
         $2 !~ /^[bcdefghijklnrtuv]{8}(-[bcdefghijklnrtuv]{8}){7}$/ { exit 1 }
         { count++ }
-        END { exit count == 2 ? 0 : 1 }
+        END { exit count > 0 ? 0 : 1 }
     ' "$RECOVERY_KEY_FILE" || die "recovery-key output is malformed: $RECOVERY_KEY_FILE"
 }
 

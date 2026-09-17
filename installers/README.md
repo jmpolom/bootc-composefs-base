@@ -25,7 +25,10 @@ Each record uses these fields:
   whole device, or a retained device. `partition_number`, `partition_size`,
   `partition_type`, and `partition_label` form an all-or-none tuple for a
   partitioned create; relation records specify neither device nor partition
-  fields. Partition numbers are explicit and do not depend on list order.
+  fields. Partition numbers are explicit and do not depend on list order. For
+  each disk, the installer creates partitions in ascending numeric order. A
+  disk may have at most one `remainder` partition, and it must have the highest
+  partition number on that disk.
 * `mountpoint`, `fs`, `fs_label`, and `mount_options` describe the filesystem.
   A created filesystem requires an explicit `fs_label`; retained filesystems
   may use any filesystem supported by the kernel.
@@ -194,24 +197,26 @@ Existing-volume regressions use an optional trusted pre-install hook. `-H FILE` 
 `QEMU_PREINSTALL_HOOK`) copies the executable into the live guest and runs it after target and
 extra disks are checked but before Podman invokes the installer. It receives target, extra, and
 scratch by-id paths as positional arguments and the corresponding `QEMU_PREINSTALL_*` variables.
-For composefs existing LUKS2+Btrfs `/var`:
+The shared retained-volume fixture provides an encrypted Btrfs `/var` with an
+existing `var` subvolume and an encrypted XFS `/var/qemu-xfs`. Run it with
+composefs:
 
 ```bash
-./test-with-qemu.sh -r all -C test-configs/qemu-existing-composefs.env \
-  -H test-configs/qemu-hooks/prepare-existing-composefs-var.sh \
+./test-with-qemu.sh -r all -C test-configs/qemu-existing-default.env \
+  -H test-configs/qemu-hooks/prepare-existing-default.sh \
   -i ghcr.io/example/os:tag
 ```
 
-For OSTree existing LUKS2+XFS `/var`:
+Run the same configuration and hook with OSTree:
 
 ```bash
-./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-existing-ostree.env \
-  -H test-configs/qemu-hooks/prepare-existing-ostree-var.sh \
+./test-with-qemu.sh -r all -b ostree -C test-configs/qemu-existing-default.env \
+  -H test-configs/qemu-hooks/prepare-existing-default.sh \
   -i ghcr.io/example/os:tag
 ```
 
-After boot, verify recovery records, `findmnt /var`, and the seed marker. Existing contents are
-not migrated or overwritten. Existing-volume hooks generate credentials in the guest runtime
+After boot, verify three recovery records, `findmnt /var`, `findmnt /var/qemu-xfs`, and both seed
+markers. Existing contents are not migrated or overwritten. Existing-volume hooks generate credentials in the guest runtime
 directory and do not commit secrets.
 
 ## Removing a backend
