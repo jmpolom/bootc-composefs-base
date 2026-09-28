@@ -54,12 +54,12 @@ RUN useradd -U -c 'delete me' \
             default
 
 COPY installers/ /usr/libexec/bootc-installer/
-RUN set -e; \
+RUN set -e -o pipefail; \
     find /run /tmp -mindepth 1 \
-      -exec findmnt -rn -M {} \; -prune -o \
+      -exec sh -c 'findmnt -rn -M "$1" >/dev/null' sh {} \; -prune -o \
       \( -type f -o -type l \) -exec rm -f -- {} +; \
     find /run /tmp -mindepth 1 \
-      -exec findmnt -rn -M {} \; -prune -o \
+      -exec sh -c 'findmnt -rn -M "$1" >/dev/null' sh {} \; -prune -o \
       -type d -print0 | sort -zr | \
       xargs -0 -r rmdir --ignore-fail-on-non-empty --
 
