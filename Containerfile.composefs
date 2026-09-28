@@ -68,9 +68,14 @@ RUN useradd -U -c 'delete me' \
             default
 
 COPY installers/ /usr/libexec/bootc-installer/
-RUN find /run /tmp -mindepth 1 -maxdepth 1 \
-    ! -path /run/secrets ! -path /run/.containerenv \
-    -exec rm -rf -- {} +
+RUN set -e; \
+    find /run /tmp -mindepth 1 \
+      -exec findmnt -rn -M {} \; -prune -o \
+      \( -type f -o -type l \) -exec rm -f -- {} +; \
+    find /run /tmp -mindepth 1 \
+      -exec findmnt -rn -M {} \; -prune -o \
+      -type d -print0 | sort -zr | \
+      xargs -0 -r rmdir --ignore-fail-on-non-empty --
 
 # bootc's runtime-deps lint checks PATH inside a confined root and cannot
 # traverse the absolute /usr/local symlink. Required binaries are in /usr/bin.
