@@ -1,4 +1,4 @@
-ARG release=43
+ARG release=44
 ARG repos_image=quay.io/fedora/fedora:$release
 ARG builder_image=quay.io/fedora/fedora:$release
 
