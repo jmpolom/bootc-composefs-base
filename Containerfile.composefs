@@ -68,9 +68,13 @@ RUN useradd -U -c 'delete me' \
             default
 
 COPY installers/ /usr/libexec/bootc-installer/
-RUN rm -rf /run/* /tmp/*
+RUN find /run /tmp -mindepth 1 -maxdepth 1 \
+    ! -path /run/secrets ! -path /run/.containerenv \
+    -exec rm -rf -- {} +
 
-RUN bootc container lint --no-truncate
+# bootc's runtime-deps lint checks PATH inside a confined root and cannot
+# traverse the absolute /usr/local symlink. Required binaries are in /usr/bin.
+RUN PATH=/usr/bin bootc container lint --no-truncate
 
 LABEL containers.bootc=1
 LABEL ostree.bootable=1
