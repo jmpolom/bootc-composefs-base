@@ -54,5 +54,6 @@ RUN useradd -U -c 'delete me' \
             default
 
 COPY installers/ /usr/libexec/bootc-installer/
+RUN rm -rf /run/* /tmp/*
 
-RUN bootc container lint
+RUN bootc container lint --no-truncate
