@@ -125,7 +125,7 @@ composefs_locate_deployment() {
 
     # Unsupported external transports must never select the installer's image.
     if [[ -z $source_imgref || -n $composefs_source_id ]]; then
-        [[ -n $composefs_source_id ]] && digest_args+=("$composefs_source_id")
+        [[ -n $composefs_source_id ]] && digest_args+=("${composefs_source_id#sha256:}")
         if digest=$(RUST_LOG=$rust_log TMPDIR=/var/tmp bootc "${digest_args[@]}"); then
             if [[ $digest =~ ^[[:xdigit:]]{128}$ ]]; then
                 config_root=$install_root/state/deploy/$digest

@@ -43,7 +43,7 @@ id=$(printf 'c%.0s' {1..64})
 composefs_build_bootc_args
 composefs_locate_deployment
 [[ ${bootc_args[*]} == *"--source-imgref=$composefs_effective_source"* ]] || die 'source ID not installed'
-[[ $(tail -n 1 "$tmp/bootc") == *"${composefs_source_id}" ]] || die 'source ID not computed'
+[[ $(tail -n 1 "$tmp/bootc") == *"${composefs_source_id#sha256:}" ]] || die 'source ID not computed'
 assert_eq "$(wc -l <"$tmp/podman" | tr -d ' ')" 1
 source_imgref=containers-storage:local:tag target_imgref=registry/update:stable
 composefs_prepare_source
