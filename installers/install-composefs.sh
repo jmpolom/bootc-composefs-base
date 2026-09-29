@@ -81,7 +81,8 @@ composefs_prepare_source() {
     composefs_source_id=${composefs_source_id#sha256:}
     [[ $composefs_source_id =~ ^[[:xdigit:]]{64}$ ]] || die "invalid composefs source image ID"
     composefs_source_id=sha256:${composefs_source_id,,}
-    composefs_effective_source=containers-storage:$composefs_source_id
+    # The storage transport accepts a bare ID; sha256: is parsed as a tag.
+    composefs_effective_source=containers-storage:${composefs_source_id#sha256:}
     if [[ -z $composefs_effective_target ]]; then
         composefs_effective_target=${source_imgref#docker://}
         composefs_effective_target=${composefs_effective_target#containers-storage:}

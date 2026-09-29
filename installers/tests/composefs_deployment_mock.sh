@@ -37,7 +37,7 @@ source_imgref=docker://registry/example:latest
 composefs_prepare_source
 assert_eq "$source_imgref" docker://registry/example:latest
 assert_eq "$composefs_effective_target" registry/example:latest
-assert_eq "$composefs_effective_source" "containers-storage:sha256:$id"
+assert_eq "$composefs_effective_source" "containers-storage:$id"
 # A moved tag must not change the captured ID or cause a second lookup.
 id=$(printf 'c%.0s' {1..64})
 composefs_build_bootc_args
