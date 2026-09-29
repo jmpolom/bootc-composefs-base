@@ -58,6 +58,37 @@ composefs_preflight() {
         skip-finalize source-imgref target-imgref
 }
 
+composefs_prepare_source() {
+    composefs_source_id=
+    composefs_effective_source=$source_imgref
+    composefs_effective_target=$target_imgref
+    case $source_imgref in
+        '') return 0 ;;
+        docker://*)
+            require_commands podman
+            if ! composefs_source_id=$(TMPDIR=/var/tmp podman pull --quiet --policy=always "$source_imgref"); then
+                die "failed to pull composefs source: $source_imgref"
+            fi
+            ;;
+        containers-storage:*)
+            require_commands podman
+            if ! composefs_source_id=$(podman image inspect --format '{{.Id}}' "${source_imgref#containers-storage:}"); then
+                die "failed to resolve composefs source: $source_imgref"
+            fi
+            ;;
+        *) return 0 ;;
+    esac
+    composefs_source_id=${composefs_source_id#sha256:}
+    [[ $composefs_source_id =~ ^[[:xdigit:]]{64}$ ]] || die "invalid composefs source image ID"
+    composefs_source_id=sha256:${composefs_source_id,,}
+    composefs_effective_source=containers-storage:$composefs_source_id
+    if [[ -z $composefs_effective_target ]]; then
+        composefs_effective_target=${source_imgref#docker://}
+        composefs_effective_target=${composefs_effective_target#containers-storage:}
+    fi
+    log "Prepared composefs source image ID: $composefs_source_id"
+}
+
 composefs_install_target_path() {
     local target_root=$1 mount_point=$2
     printf '%s/state/os/default/var%s\n' "$target_root" "${mount_point#/var}"
@@ -72,8 +103,8 @@ composefs_build_bootc_args() {
         "--bootloader=$bootloader"
     )
 
-    [[ -n $source_imgref ]] && bootc_args+=("--source-imgref=$source_imgref")
-    [[ -n $target_imgref ]] && bootc_args+=("--target-imgref=$target_imgref")
+    [[ -n $composefs_effective_source ]] && bootc_args+=("--source-imgref=$composefs_effective_source")
+    [[ -n $composefs_effective_target ]] && bootc_args+=("--target-imgref=$composefs_effective_target")
     [[ $allow_missing_verity == true ]] && bootc_args+=(--allow-missing-verity)
     append_common_kargs "$physical_var_path" "$root_setup_unit"
 }
@@ -88,16 +119,39 @@ composefs_append_external_var_karg() {
 
 composefs_locate_deployment() {
     local -a composefs_states=()
+    local -a digest_args=(container compute-composefs-digest-from-storage)
+    local digest
+
+    # Unsupported external transports must never select the installer's image.
+    if [[ -z $source_imgref || -n $composefs_source_id ]]; then
+        [[ -n $composefs_source_id ]] && digest_args+=("$composefs_source_id")
+        if digest=$(RUST_LOG=$rust_log TMPDIR=/var/tmp bootc "${digest_args[@]}"); then
+            if [[ $digest =~ ^[[:xdigit:]]{128}$ ]]; then
+                config_root=$install_root/state/deploy/$digest
+                [[ -d $config_root/etc ]] || die "composefs digest configuration root is missing: $config_root"
+                log "Composefs deployment lookup: computed digest $digest; directory $config_root; source ID ${composefs_source_id:-self}"
+                return 0
+            fi
+            log "Warning: malformed composefs digest; using singleton deployment fallback"
+        else
+            log "Warning: composefs digest computation failed; using singleton deployment fallback"
+        fi
+    else
+        log "Warning: unsupported composefs source transport; using singleton deployment fallback"
+    fi
 
     mapfile -t composefs_states < <(find "$install_root/state/deploy" -mindepth 1 -maxdepth 1 -type d -print)
     ((${#composefs_states[@]} == 1)) ||
         die "expected exactly one composefs deployment state, found ${#composefs_states[@]}"
     config_root=${composefs_states[0]}
     [[ -d $config_root/etc ]] || die "composefs deployment configuration root is missing: $config_root"
+    log "Composefs deployment lookup: singleton fallback; directory $config_root"
 }
 
 composefs_postprocess() {
     configure_composefs_boot_mounts "$config_root" "$script_dir/backends/composefs/systemd"
 }
 
-run_installer composefs "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    run_installer composefs "$@"
+fi

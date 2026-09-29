@@ -634,6 +634,7 @@ podman run --rm --pull=never --privileged \
     --volume /dev:/dev \
     --volume /run/udev:/run/udev:ro \
     --volume /var/lib/containers:/var/lib/containers \
+    --volume /var/lib/containers/storage:/run/host-container-storage:ro \
     --volume /var/tmp:/var/tmp \
     --volume "$persistent_dir:$persistent_dir:ro" \
     --volume "$runtime_dir:$runtime_dir" \

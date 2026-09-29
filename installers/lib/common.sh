@@ -520,6 +520,7 @@ run_installer() {
     normalize_volume_shortcuts
     validate_common_config
     backend_callback preflight
+    backend_callback prepare_source
 
     mkdir -p "$work_root"
     [[ $recovery_enrollment_requested == true ]] && initialize_recovery_key_output

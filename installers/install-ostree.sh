@@ -18,6 +18,8 @@ ostree_preflight() {
         source-imgref target-imgref
 }
 
+ostree_prepare_source() { :; }
+
 ostree_install_target_path() {
     local target_root=$1 mount_point=$2
     printf '%s/ostree/deploy/default/var%s\n' "$target_root" "${mount_point#/var}"
@@ -62,4 +64,6 @@ ostree_postprocess() {
     return 0
 }
 
-run_installer ostree "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    run_installer ostree "$@"
+fi

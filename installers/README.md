@@ -87,13 +87,13 @@ The composefs and OSTree entrypoints own only backend paths, options, assets, an
 
 Sourcing `lib/common.sh` is side-effect-free: it defines functions and globals but does not parse
 arguments, install traps, create directories, or start an installation. Each entrypoint defines
-the same callback contract (`*_set_defaults`, `*_preflight`, `*_install_target_path`,
+the same callback contract (`*_set_defaults`, `*_preflight`, `*_prepare_source`, `*_install_target_path`,
 `*_build_bootc_args`, `*_append_external_var_karg`, `*_locate_deployment`, and `*_postprocess`).
 Backend policy and assets stay in the backend entrypoint while storage, state, and orchestration
 remain shared.
 
 Preflight validates configuration, paths, commands, assets, records, mapper names, mount options,
-and backend requirements before recovery output is initialized or any disk is erased. Cleanup
+and backend requirements; source preparation then runs before recovery output is initialized or any disk is erased. Cleanup
 attempts reverse-order unmounts, mapper closes, and temporary-key removal, logs individual failures,
 preserves the original failure status, and reports success only when cleanup succeeds. There are
 no forced or lazy unmounts and no rollback machinery.
@@ -113,15 +113,28 @@ Use `-t` for Bash `set -x`; this can expose passwords, hashes, recovery keys, an
 values. `rust_log` is exported as `RUST_LOG` only for bootc. Leave `source_imgref` empty when the
 installer runs inside the image it should install; set it only for a different image and use a
 containers/image transport-qualified reference such as `docker://quay.io/example/os:latest`.
+Composefs pulls explicit `docker://` sources with an always-pull policy and resolves local
+`containers-storage:` sources once, installing the captured immutable image ID. Original configuration
+values remain intact. An explicit `target_imgref` controls future updates; otherwise the original
+source with its transport removed supplies the update reference. Digest-only sources remain pinned,
+so set an explicit update tag when future tag-based updates are wanted.
+After installation, bootc computes the installed composefs digest to select its configuration
+directory. Missing commands, failed computations, malformed output, and unsupported source transports
+use the legacy singleton deployment lookup; a valid digest without its matching directory fails.
+The QEMU launcher also mounts host container storage read-only at `/run/host-container-storage`
+for bootc's digest lookup. Default self-install keeps bootc's own source selection; bootc 1.16.13
+can still encounter a detectable race if its local tag moves between install and digest lookup.
 The target image must already grant sudo access to `wheel`; plaintext user passwords are unsupported,
 so configure `user_password_hash` or leave it empty to create a locked account.
 
 Run the focused checks with Bash 5 or newer:
 
 ```text
-bash -n installers/lib/*.sh installers/tests/*.sh
+bash -n installers/*.sh installers/lib/*.sh installers/tests/*.sh test-with-qemu.sh
+shellcheck installers/*.sh installers/lib/*.sh installers/tests/*.sh test-with-qemu.sh
 bash installers/tests/storage_architecture.sh
 bash installers/tests/storage_mock.sh
+bash installers/tests/composefs_deployment_mock.sh
 ```
 
 ## Backend behavior and layout
