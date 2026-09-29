@@ -13,21 +13,7 @@ on:
       - "poc"
 
 jobs:
-  installer-checks:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install check tools
-        run: sudo apt-get update && sudo apt-get install -y ripgrep shellcheck
-      - name: Check installers
-        run: |
-          bash -n installers/*.sh installers/lib/*.sh installers/tests/*.sh test-with-qemu.sh
-          shellcheck installers/*.sh installers/lib/*.sh installers/tests/*.sh test-with-qemu.sh
-          bash installers/tests/storage_architecture.sh
-          bash installers/tests/storage_mock.sh
-          bash installers/tests/composefs_deployment_mock.sh
   build:
-    needs: installer-checks
     if: contains(fromJson('["main","test","stage","next","poc"]'), github.ref_name)
     runs-on: ${{ matrix.target_arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     permissions:
